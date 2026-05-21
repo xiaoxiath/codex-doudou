@@ -1,0 +1,8 @@
+.DS_Store
+build/
+dist/
+.pio/
+.vscode/
+sdkconfig.old
+managed_components/
+
