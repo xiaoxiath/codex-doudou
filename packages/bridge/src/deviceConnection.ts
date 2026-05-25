@@ -68,7 +68,19 @@ export class DeviceConnection implements DeviceTransport {
     }, HELLO_TIMEOUT_MS);
 
     ws.on('message', (raw) => this.onRaw(raw.toString()));
-    ws.on('close', () => this.onClose());
+    /* Log close code + reason so we can correlate device-side
+     * disconnect logs with what the bridge end actually decided. */
+    ws.on('close', (code, reason) => {
+      log.info(
+        {
+          device: this.state?.deviceId,
+          code,
+          reason: reason?.toString() || '',
+        },
+        'ws close',
+      );
+      this.onClose();
+    });
     ws.on('error', (err) =>
       log.warn({ err: String(err), device: this.state?.deviceId }, 'ws error'),
     );

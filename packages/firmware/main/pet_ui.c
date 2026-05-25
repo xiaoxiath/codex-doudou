@@ -817,7 +817,16 @@ static void sleep_check_cb(lv_timer_t *t)
     (void)t;
     if (s_state == DOUDOU_PET_SLEEPING) return;
     int64_t now = esp_timer_get_time();
-    if ((now - s_last_activity_us) >= AUTO_SLEEP_AFTER_US) {
+    int64_t idle_us = now - s_last_activity_us;
+    /* Periodic visibility at DEBUG so it's silent in normal builds but
+     * easy to flip on via `idf.py menuconfig → Component config → Log →
+     * Default log verbosity = Debug` when triaging "why no sleep?". */
+    static int s_tick = 0;
+    if ((++s_tick % 6) == 0) {
+        ESP_LOGD(TAG, "sleep_check idle=%lld s state=%d",
+                 (long long)(idle_us / 1000000), (int)s_state);
+    }
+    if (idle_us >= AUTO_SLEEP_AFTER_US) {
         ESP_LOGI(TAG, "no activity for 60s → SLEEPING");
         doudou_pet_set_state(DOUDOU_PET_SLEEPING);
     }
@@ -826,6 +835,33 @@ static void sleep_check_cb(lv_timer_t *t)
 static void mark_activity(void)
 {
     s_last_activity_us = esp_timer_get_time();
+    /* DEBUG-level trace of every activity bump — helps pin down "who
+     * keeps doudou awake?" when sleep stops triggering. Most likely
+     * culprits are bridge replaying status/title on every reconnect,
+     * or thread_name_updated bursts during rapid rollout switching. */
+    ESP_LOGD(TAG, "mark_activity state=%d", (int)s_state);
+}
+
+/* DONE → IDLE auto-settle. DONE is a "task finished" celebratory pose
+ * (green glow, happy eyes); it should celebrate briefly and then drop
+ * back to IDLE so the auto-sleep clock can run. Without this, doudou
+ * sits forever in DONE until the next Codex event pushes a new state. */
+#define DONE_AUTO_IDLE_MS 5000
+static lv_timer_t *s_done_to_idle_timer = NULL;
+
+static void done_to_idle_cb(lv_timer_t *t)
+{
+    /* Mark consumed FIRST so the recursive set_state below doesn't see
+     * a live pointer and try to lv_timer_delete it — that would free
+     * `t` from under us and trash LVGL's timer list when we delete
+     * again at the bottom. Order matters; do not reorder. */
+    s_done_to_idle_timer = NULL;
+    if (s_state == DOUDOU_PET_DONE) {
+        /* Only settle if we're still in DONE — a thinking/executing/
+         * error push during the 5-s window should win. */
+        doudou_pet_set_state(DOUDOU_PET_IDLE);
+    }
+    lv_timer_delete(t);
 }
 
 void doudou_pet_set_state(doudou_pet_state_t state)
@@ -842,10 +878,41 @@ void doudou_pet_set_state(doudou_pet_state_t state)
                                       lv_color_hex(state_glow_color(state)),
                                       LV_PART_MAIN);
     }
+    /* SLEEPING is a screensaver: hide top thread-title and bottom
+     * status text so only the dozing pet + zzz accessory show. Both
+     * come back the moment we leave SLEEPING (wake or new event). */
+    const bool sleeping = (state == DOUDOU_PET_SLEEPING);
+    if (s_label_title) {
+        if (sleeping) lv_obj_add_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
+        else          lv_obj_remove_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_label_status) {
+        if (sleeping) lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
+        else          lv_obj_remove_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
+    }
     /* Any real-state set bumps the activity clock (so SLEEPING re-enters
      * after another full 60s of silence). Setting SLEEPING itself does
      * not bump — otherwise the timer would never expire. */
     if (state != DOUDOU_PET_SLEEPING) mark_activity();
+
+    /* Manage the DONE auto-settle timer:
+     *  - leaving DONE for anything else → cancel pending timer
+     *  - entering DONE → (re)arm a fresh 5-s countdown */
+    if (s_done_to_idle_timer && state != DOUDOU_PET_DONE) {
+        lv_timer_delete(s_done_to_idle_timer);
+        s_done_to_idle_timer = NULL;
+    }
+    if (state == DOUDOU_PET_DONE) {
+        if (s_done_to_idle_timer) {
+            lv_timer_delete(s_done_to_idle_timer);
+            s_done_to_idle_timer = NULL;
+        }
+        s_done_to_idle_timer = lv_timer_create(done_to_idle_cb,
+                                               DONE_AUTO_IDLE_MS, NULL);
+        if (s_done_to_idle_timer) {
+            lv_timer_set_repeat_count(s_done_to_idle_timer, 1);
+        }
+    }
     doudou_lvgl_unlock();
 }
 
