@@ -103,6 +103,11 @@ export class RolloutWatcherFeed implements CodexFeed {
   private activity: ActivityEntry[] = [];
   /** Used by attachTo to detect we're replaying historical content vs live tail. */
   private replayingHistory = false;
+  /** True if any status/etc. was actually pushed live during the most
+   *  recent replay (because a recent entry slipped through). attachTo
+   *  uses this to skip the "跟随会话 idle" stamp that would otherwise
+   *  clobber the fresh thinking/executing state. */
+  private emittedDuringReplay = false;
   /** Current rollout's session_meta timestamp parsed to ms, used to skip very old replay events. */
   private currentSessionStartMs = 0;
   /** Latest merged usage snapshot — replayed to new devices on connect. */
@@ -348,17 +353,25 @@ export class RolloutWatcherFeed implements CodexFeed {
 
     // Replay existing content silently to seed metadata + activity buffer
     // without flashing every historical status/usage on the device's pet.
+    // (onEventMsg auto-promotes entries <60 s old to live emissions, so
+    // a task_started written between mtime-detection and our attach
+    // still reaches the device.)
     this.replayingHistory = true;
+    this.emittedDuringReplay = false;
     await this.readToEnd();
     this.replayingHistory = false;
 
-    // Emit a clean "now following" status so the pet UI snaps to a known state.
-    this.onEvent?.({
-      kind: 'status',
-      state: 'idle',
-      title: '跟随会话',
-      body: this.current.cwd?.split('/').slice(-1)[0] ?? this.current.source ?? undefined,
-    });
+    // Emit a clean "now following" status — but only if nothing more
+    // specific was already emitted during replay. Otherwise we'd clobber
+    // a freshly-woken "thinking" with a stale "idle / 跟随会话".
+    if (!this.emittedDuringReplay) {
+      this.onEvent?.({
+        kind: 'status',
+        state: 'idle',
+        title: '跟随会话',
+        body: this.current.cwd?.split('/').slice(-1)[0] ?? this.current.source ?? undefined,
+      });
+    }
     if (this.current.modelContextWindow) {
       this.onEvent?.({
         kind: 'usage',
@@ -531,6 +544,25 @@ export class RolloutWatcherFeed implements CodexFeed {
 
   private onEventMsg(p: EventMsgPayload, entryTs?: string): void {
     if (!p || !p.type) return;
+    /* If we're in the "silent replay" window of attachTo, normally status
+     * events are suppressed to avoid flashing every historic state on
+     * the device. But if this entry happened within the last 60 s, it's
+     * almost certainly a live conversation the user just started (typical
+     * race: user types a prompt → codex writes task_started → bridge's
+     * mtime poller picks the file 1-5 s later → attachTo starts replaying
+     * and the user's task_started lands during replay). Promoting recent
+     * events to live emissions makes the device wake up as the user
+     * expects, without re-introducing the multi-day-old replay flicker. */
+    if (this.replayingHistory && entryTs) {
+      const tsMs = Date.parse(entryTs);
+      if (!Number.isNaN(tsMs) && Date.now() - tsMs < 60_000) {
+        /* Downgrade replay → live for this entry and any subsequent
+         * entries (JSONL is chronological, so anything after is at
+         * least as recent). */
+        this.replayingHistory = false;
+        this.emittedDuringReplay = true;
+      }
+    }
     switch (p.type) {
       case 'thread_name_updated': {
         /* Codex auto-summarises the active thread (sometimes after the

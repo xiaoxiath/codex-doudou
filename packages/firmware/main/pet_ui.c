@@ -873,15 +873,38 @@ static void done_to_idle_cb(lv_timer_t *t)
  * later when the user actually touches the device. */
 static doudou_pet_state_t s_pending_under_sleep = DOUDOU_PET_IDLE;
 
-/* States that are "user-attention-worthy" — these MAY wake doudou from
- * sleep. Background status pushes (idle/thinking/executing/done) must
- * NOT wake — codex running its own task in the background is not user
- * activity. Otherwise the screensaver gets clobbered by every Codex
- * Desktop event. */
+/* Cache the last-set text on both labels. Two purposes:
+ *  1. Suppress no-op mark_activity bumps when bridge replays the same
+ *     title/status after a rollout switch.
+ *  2. Carry the freshest title/status through a sleep cycle — while
+ *     sleeping, set_title/set_status update the cache but not the
+ *     hidden widget; on wake set_state re-applies the cache so the
+ *     bridge's most-recent push is what the user sees. Empty = unset. */
+static char s_cached_title[80]  = {0};
+static char s_cached_status[40] = {0};
+
+/* States that wake doudou from sleep. The signal we're trying to
+ * filter is bridge "bookkeeping" pushes — every rollout switch /
+ * follow_thread / replay-on-reconnect re-emits `state: idle` even
+ * though nothing real changed. Real codex activity (thinking /
+ * executing / done / waiting / error) IS user-attention-worthy and
+ * SHOULD wake.
+ *
+ * The asymmetry that matters:
+ *  - IDLE → SLEEPING → IDLE-from-bridge:  ignore  (bookkeeping)
+ *  - IDLE → SLEEPING → THINKING:          wake    (user just asked)
+ *  - IDLE → SLEEPING → DONE:              wake    (briefly celebrate)
+ *  - IDLE → SLEEPING → WAITING:           wake    (question)
+ *  - IDLE → SLEEPING → ERROR:             wake    (something's wrong)
+ *
+ * Without this, the user starts a new conversation in Codex Desktop,
+ * the device stays asleep, and the whole "show me what Codex is
+ * doing" promise breaks. */
 static bool state_warrants_wake(doudou_pet_state_t s)
 {
-    return s == DOUDOU_PET_WAITING       /* question / awaiting input */
-        || s == DOUDOU_PET_ERROR;        /* something is wrong */
+    /* Anything except IDLE counts as real activity worth waking for. */
+    return s != DOUDOU_PET_IDLE
+        && s != DOUDOU_PET_SLEEPING;
 }
 
 void doudou_pet_set_state(doudou_pet_state_t state)
@@ -915,16 +938,28 @@ void doudou_pet_set_state(doudou_pet_state_t state)
                                       LV_PART_MAIN);
     }
     /* SLEEPING is a screensaver: hide top thread-title and bottom
-     * status text so only the dozing pet + zzz accessory show. Both
-     * come back the moment we leave SLEEPING (wake or new event). */
+     * status text so only the dozing pet + zzz accessory show. When
+     * we wake, restore visibility AND re-apply the cached text — while
+     * sleeping, set_title/set_status only updated the cache (the
+     * widget was hidden anyway), so without this re-apply the label
+     * stays whatever it was before sleep and bridge's most-recent
+     * title/status update is invisible. */
     const bool sleeping = (state == DOUDOU_PET_SLEEPING);
     if (s_label_title) {
-        if (sleeping) lv_obj_add_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
-        else          lv_obj_remove_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
+        if (sleeping) {
+            lv_obj_add_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
+            if (s_cached_title[0]) lv_label_set_text(s_label_title, s_cached_title);
+        }
     }
     if (s_label_status) {
-        if (sleeping) lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
-        else          lv_obj_remove_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
+        if (sleeping) {
+            lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
+            if (s_cached_status[0]) lv_label_set_text(s_label_status, s_cached_status);
+        }
     }
     if (changed && state != DOUDOU_PET_SLEEPING) MARK_ACTIVITY_FROM("set_state");
     /* Reset the pending-under-sleep latch — we're no longer sleeping. */
@@ -950,12 +985,6 @@ void doudou_pet_set_state(doudou_pet_state_t state)
     }
     doudou_lvgl_unlock();
 }
-
-/* Cache the last-set text on both labels so we can suppress no-op
- * mark_activity bumps when bridge replays the same title/status after
- * a rollout switch. Empty string = never set. */
-static char s_cached_title[80]  = {0};
-static char s_cached_status[40] = {0};
 
 void doudou_pet_set_title(const char *title)
 {
