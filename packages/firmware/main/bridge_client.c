@@ -335,7 +335,10 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id, void 
  *     to reconnect). A hard restart kicks it free.
  *
  * Period 5 s — coarse enough to be cheap, fine enough to feel snappy. */
-#define KEEPALIVE_INTERVAL_US  ((int64_t)20 * 1000 * 1000)
+/* 10 s keepalive — short enough that even with one packet lost (or a
+ * brief Wi-Fi blip), the next ping arrives well within bridge's
+ * heartbeat window (HEARTBEAT_MS=15 s × GRACE=2 = 30 s on bridge). */
+#define KEEPALIVE_INTERVAL_US  ((int64_t)10 * 1000 * 1000)
 #define STUCK_THRESHOLD_US     ((int64_t)30 * 1000 * 1000)
 
 static void send_keepalive_ping(void)
@@ -380,9 +383,20 @@ static void recreate_ws_client(void)
 static void keepalive_task(void *arg)
 {
     (void)arg;
+    int64_t s_last_status_log_us = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(3000));   /* poll cadence */
         int64_t now_us = esp_timer_get_time();
+        /* Periodic state heartbeat to UART (every 60 s) so we can
+         * spot split-brain: device thinks connected, bridge thinks
+         * not. We'll observe disconnect_count + s_connected mismatch
+         * over time. */
+        if (now_us - s_last_status_log_us > 60 * 1000 * 1000) {
+            s_last_status_log_us = now_us;
+            ESP_LOGI(TAG, "ws status: connected=%d disconnects=%lu",
+                     s_connected ? 1 : 0,
+                     (unsigned long)s_ws_disconnect_count);
+        }
         if (s_connected) {
             /* Quiet window? Send a tiny ping to refresh the link. */
             if (now_us - s_last_outbound_us > KEEPALIVE_INTERVAL_US) {

@@ -26,3 +26,7 @@ coverage/
 # Bridge runtime
 audit/
 *.audit.jsonl
+
+# Local tooling caches
+.claude/
+.cache/

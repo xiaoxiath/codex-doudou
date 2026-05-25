@@ -171,7 +171,19 @@ export class DeviceState {
     this.replay();
   }
 
-  detach(): void {
+  /**
+   * Drop the transport pointer. Pass the specific transport that's
+   * detaching so we don't accidentally null out a newer, healthy
+   * connection. Without this guard, the sequence was:
+   *  1. New connection arrives, attach() replaces old transport
+   *  2. Old socket's `close` event fires (delayed)
+   *  3. Old DeviceConnection.onClose calls state.detach()
+   *  4. detach() blindly clears this.transport — but it's now the NEW
+   *     connection's transport! → bridge thinks device disconnected
+   *     while device is happily talking on the new socket.
+   */
+  detach(who?: DeviceTransport): void {
+    if (who && this.transport && this.transport !== who) return;
     this.transport = null;
   }
 

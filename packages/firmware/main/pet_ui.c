@@ -832,14 +832,19 @@ static void sleep_check_cb(lv_timer_t *t)
     }
 }
 
-static void mark_activity(void)
+/* External tag passed by each caller so we can see WHO bumped the
+ * activity clock. Kept tiny to keep UART quiet but informative. */
+#define MARK_ACTIVITY_FROM(reason)  mark_activity_impl(reason)
+
+static void mark_activity_impl(const char *reason)
 {
     s_last_activity_us = esp_timer_get_time();
-    /* DEBUG-level trace of every activity bump — helps pin down "who
-     * keeps doudou awake?" when sleep stops triggering. Most likely
-     * culprits are bridge replaying status/title on every reconnect,
-     * or thread_name_updated bursts during rapid rollout switching. */
-    ESP_LOGD(TAG, "mark_activity state=%d", (int)s_state);
+    ESP_LOGI(TAG, "mark_activity(%s) state=%d", reason ? reason : "?", (int)s_state);
+}
+
+static void mark_activity(void)
+{
+    mark_activity_impl("?");
 }
 
 /* DONE → IDLE auto-settle. DONE is a "task finished" celebratory pose
@@ -864,9 +869,40 @@ static void done_to_idle_cb(lv_timer_t *t)
     lv_timer_delete(t);
 }
 
+/* Latch the "pending state under sleep" so we know what to wake to
+ * later when the user actually touches the device. */
+static doudou_pet_state_t s_pending_under_sleep = DOUDOU_PET_IDLE;
+
+/* States that are "user-attention-worthy" — these MAY wake doudou from
+ * sleep. Background status pushes (idle/thinking/executing/done) must
+ * NOT wake — codex running its own task in the background is not user
+ * activity. Otherwise the screensaver gets clobbered by every Codex
+ * Desktop event. */
+static bool state_warrants_wake(doudou_pet_state_t s)
+{
+    return s == DOUDOU_PET_WAITING       /* question / awaiting input */
+        || s == DOUDOU_PET_ERROR;        /* something is wrong */
+}
+
 void doudou_pet_set_state(doudou_pet_state_t state)
 {
     if (!doudou_lvgl_lock(50)) return;
+
+    /* Sleep is sticky: if we're sleeping and this push isn't a
+     * wake-worthy state, just remember it internally and return.
+     * Bridge can rapid-fire status=idle / done / thinking all it
+     * wants and the screensaver stays put until the user taps OR a
+     * question / error arrives. */
+    if (s_state == DOUDOU_PET_SLEEPING
+        && state != DOUDOU_PET_SLEEPING
+        && !state_warrants_wake(state)) {
+        s_pending_under_sleep = state;
+        ESP_LOGI(TAG, "ignoring set_state(%d) while sleeping (latched as pending)",
+                 (int)state);
+        doudou_lvgl_unlock();
+        return;
+    }
+
     const bool changed = (state != s_state);
     s_state = state;
     if (changed) apply_composition(state);
@@ -890,10 +926,9 @@ void doudou_pet_set_state(doudou_pet_state_t state)
         if (sleeping) lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
         else          lv_obj_remove_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
     }
-    /* Any real-state set bumps the activity clock (so SLEEPING re-enters
-     * after another full 60s of silence). Setting SLEEPING itself does
-     * not bump — otherwise the timer would never expire. */
-    if (state != DOUDOU_PET_SLEEPING) mark_activity();
+    if (changed && state != DOUDOU_PET_SLEEPING) MARK_ACTIVITY_FROM("set_state");
+    /* Reset the pending-under-sleep latch — we're no longer sleeping. */
+    if (state != DOUDOU_PET_SLEEPING) s_pending_under_sleep = DOUDOU_PET_IDLE;
 
     /* Manage the DONE auto-settle timer:
      *  - leaving DONE for anything else → cancel pending timer
@@ -916,16 +951,33 @@ void doudou_pet_set_state(doudou_pet_state_t state)
     doudou_lvgl_unlock();
 }
 
+/* Cache the last-set text on both labels so we can suppress no-op
+ * mark_activity bumps when bridge replays the same title/status after
+ * a rollout switch. Empty string = never set. */
+static char s_cached_title[80]  = {0};
+static char s_cached_status[40] = {0};
+
 void doudou_pet_set_title(const char *title)
 {
     if (!doudou_lvgl_lock(50)) return;
-    if (s_label_title) lv_label_set_text(s_label_title, title && *title ? title : "-");
-    mark_activity();
-    /* Coming back from sleep — restore an alert face. */
+    const char *eff = title && *title ? title : "-";
+    bool changed = strncmp(eff, s_cached_title, sizeof(s_cached_title)) != 0;
+    /* While sleeping, latch the cached text but don't update LVGL
+     * widget (hidden anyway) and DON'T mark activity. Sleep stays
+     * sticky until user touches OR a real wake event arrives. */
     if (s_state == DOUDOU_PET_SLEEPING) {
+        if (changed) {
+            strncpy(s_cached_title, eff, sizeof(s_cached_title) - 1);
+            s_cached_title[sizeof(s_cached_title) - 1] = '\0';
+        }
         doudou_lvgl_unlock();
-        doudou_pet_set_state(DOUDOU_PET_IDLE);
         return;
+    }
+    if (s_label_title) lv_label_set_text(s_label_title, eff);
+    if (changed) {
+        strncpy(s_cached_title, eff, sizeof(s_cached_title) - 1);
+        s_cached_title[sizeof(s_cached_title) - 1] = '\0';
+        MARK_ACTIVITY_FROM("set_title");
     }
     doudou_lvgl_unlock();
 }
@@ -933,12 +985,21 @@ void doudou_pet_set_title(const char *title)
 void doudou_pet_set_status(const char *status)
 {
     if (!doudou_lvgl_lock(50)) return;
-    if (s_label_status) lv_label_set_text(s_label_status, status && *status ? status : label_for_state(s_state));
-    mark_activity();
+    const char *eff = status && *status ? status : label_for_state(s_state);
+    bool changed = strncmp(eff, s_cached_status, sizeof(s_cached_status)) != 0;
     if (s_state == DOUDOU_PET_SLEEPING) {
+        if (changed) {
+            strncpy(s_cached_status, eff, sizeof(s_cached_status) - 1);
+            s_cached_status[sizeof(s_cached_status) - 1] = '\0';
+        }
         doudou_lvgl_unlock();
-        doudou_pet_set_state(DOUDOU_PET_IDLE);
         return;
+    }
+    if (s_label_status) lv_label_set_text(s_label_status, eff);
+    if (changed) {
+        strncpy(s_cached_status, eff, sizeof(s_cached_status) - 1);
+        s_cached_status[sizeof(s_cached_status) - 1] = '\0';
+        MARK_ACTIVITY_FROM("set_status");
     }
     doudou_lvgl_unlock();
 }

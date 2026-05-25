@@ -33,7 +33,11 @@ import {
 
 const HEARTBEAT_MS = 15_000;
 const HELLO_TIMEOUT_MS = 2_000;
-const HEARTBEAT_GRACE = 2;
+/* 4 × 15 s = 60 s. Device keepalive pings every 10 s, so a 60 s window
+ * is generous: it takes 5 lost pings in a row before bridge gives up.
+ * Was 2 (30 s), which was tight enough that a brief Wi-Fi blip would
+ * close the WS and trigger a reconnect storm. */
+const HEARTBEAT_GRACE = 4;
 
 export interface DeviceConnectionOptions {
   registry: DeviceRegistry;
@@ -131,6 +135,22 @@ export class DeviceConnection implements DeviceTransport {
     } catch {
       /* ignore */
     }
+    /* Send the polite WS close frame above, then force-kill the
+     * underlying socket after a short grace. Without terminate(), if
+     * the device never responds to the close frame (firmware WS task
+     * stuck, network blip, IDF lib quirk), the TCP socket sits
+     * ESTABLISHED in the kernel while ws lib's auto-pong keeps the
+     * device thinking the link is alive — classic split-brain. We saw
+     * exactly this on hardware: bridge said disconnected, lsof showed
+     * ESTABLISHED, device kept logging WS_PONG every 10 s. */
+    const ws = this.ws;
+    setTimeout(() => {
+      try {
+        if (ws.readyState !== ws.CLOSED) ws.terminate();
+      } catch {
+        /* ignore */
+      }
+    }, 2000);
   }
 
   // ---------- internal ----------
@@ -279,7 +299,7 @@ export class DeviceConnection implements DeviceTransport {
   private onClose(): void {
     if (this.status === 'closed') {
       this.clearTimers();
-      this.state?.detach();
+      this.state?.detach(this);
       return;
     }
     this.status = 'closed';
@@ -289,7 +309,7 @@ export class DeviceConnection implements DeviceTransport {
         { device: this.state.deviceId, inflight: this.state.inflightSize },
         'device disconnected (state retained)',
       );
-      this.state.detach();
+      this.state.detach(this);
     }
   }
 
