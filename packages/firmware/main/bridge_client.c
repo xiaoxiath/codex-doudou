@@ -88,9 +88,15 @@ esp_err_t doudou_bridge_follow_thread(const char *thread_id)
 esp_err_t doudou_bridge_reply(const char *question_id, const char *choice_id)
 {
     if (!question_id || !choice_id) return ESP_ERR_INVALID_ARG;
-    return send_owned(doudou_build_reply(s_out_seq++, local_ts_ms(),
-                                         CONFIG_DOUDOU_DEVICE_ID,
-                                         question_id, choice_id));
+    ESP_LOGI(TAG, "send reply: qid=%s choice=%s ws_connected=%d",
+             question_id, choice_id, s_connected ? 1 : 0);
+    esp_err_t err = send_owned(doudou_build_reply(s_out_seq++, local_ts_ms(),
+                                                  CONFIG_DOUDOU_DEVICE_ID,
+                                                  question_id, choice_id));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "reply send failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 /* ---------- inbound dispatch ---------- */
@@ -112,7 +118,9 @@ static void parse_and_dispatch(const char *data, size_t len)
             if (s_h.on_welcome) s_h.on_welcome(srv, sid);
             ESP_LOGI(TAG, "welcome session=%s server_time=%" PRIu64,
                      sid ? sid : "?", srv);
-            send_hello(); /* re-handshake; harmless on dup */
+            /* No re-handshake — we already sent hello on WS connect
+             * (see WEBSOCKET_EVENT_CONNECTED). Sending again here just
+             * triggers a `duplicate hello` warn on the bridge. */
         }
     } else if (!strcmp(type, "status")) {
         doudou_status_t s;
@@ -228,7 +236,12 @@ esp_err_t doudou_bridge_connect(const char *url, const doudou_bridge_handlers_t 
     esp_websocket_client_config_t cfg = {
         .uri = url,
         .reconnect_timeout_ms = 5000,
-        .network_timeout_ms = 8000,
+        /* Bridge's application-layer ping every 15s is what really
+         * proves the link is alive. Network timeout just needs to be
+         * larger than that interval so the WS lib doesn't kill the
+         * socket during normal quiet windows. Was 8000 originally,
+         * which caused device-side self-disconnects on every gap. */
+        .network_timeout_ms = 90000,
         .buffer_size = 4096,
         .task_stack = 6144,
     };

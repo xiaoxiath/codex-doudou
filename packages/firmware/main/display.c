@@ -95,8 +95,19 @@ esp_err_t doudou_display_init(void)
     esp_lcd_panel_reset(s_panel);
     esp_lcd_panel_init(s_panel);
     esp_lcd_panel_invert_color(s_panel, DOUDOU_LCD_INVERT_COLOR);
+    /* Apply explicit mirror state. Several ESP32-2424S012 boards we've
+     * tested boot the GC9A01 panel with MX bit set, which makes the
+     * frame buffer render left-right mirrored relative to the
+     * simulator (and to common sense). esp_lcd_new_panel_gc9a01 doesn't
+     * clear MX itself, so we set it deterministically here.
+     * If on your board everything reads BACKWARDS after flashing this,
+     * flip the first argument. */
+    esp_lcd_panel_mirror(s_panel, DOUDOU_LCD_MIRROR_X, DOUDOU_LCD_MIRROR_Y);
+    esp_lcd_panel_swap_xy(s_panel, false);
     esp_lcd_panel_disp_on_off(s_panel, true);
-    ESP_LOGI(TAG, "panel ready (invert=%d bgr=%d)", DOUDOU_LCD_INVERT_COLOR, DOUDOU_LCD_BGR_ORDER);
+    ESP_LOGI(TAG, "panel ready (invert=%d bgr=%d mirror=%d/%d)",
+             DOUDOU_LCD_INVERT_COLOR, DOUDOU_LCD_BGR_ORDER,
+             DOUDOU_LCD_MIRROR_X, DOUDOU_LCD_MIRROR_Y);
 
     doudou_display_backlight(1);
     return ESP_OK;

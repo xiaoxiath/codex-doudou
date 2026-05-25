@@ -40,9 +40,17 @@
 #ifdef CONFIG_DOUDOU_LCD_FOR_WOKWI
 #  define DOUDOU_LCD_INVERT_COLOR  false
 #  define DOUDOU_LCD_BGR_ORDER     false
+#  define DOUDOU_LCD_MIRROR_X      false
+#  define DOUDOU_LCD_MIRROR_Y      false
 #else
 #  define DOUDOU_LCD_INVERT_COLOR  true
 #  define DOUDOU_LCD_BGR_ORDER     true
+/* GC9A01 on the ESP32-2424S012 boards we've tested boots with MX set,
+ * which makes everything read left-right mirrored. Force MX=true here
+ * to invert that back to natural orientation. Flip if your board acts
+ * the other way around. */
+#  define DOUDOU_LCD_MIRROR_X      true
+#  define DOUDOU_LCD_MIRROR_Y      false
 #endif
 
 /* ============================================================
