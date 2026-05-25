@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "author": "Doudou",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-c3-devkitm-1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-ili9341",
+      "id": "lcd",
+      "top": -200,
+      "left": 200,
+      "attrs": {
+        "rotation": "0",
+        "_comment": "Wokwi does not ship a GC9A01 model yet. ili9341 is the closest SPI LCD model — pixel format compatible enough that LVGL flushes show correctly. Real device's circular crop is faked by Wokwi (visual mask only)."
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "touch-tap",
+      "top": 100,
+      "left": 280,
+      "attrs": {
+        "color": "blue",
+        "label": "tap",
+        "_comment": "stand-in for CST816D single-tap — bound to GPIO0 (the chip's INT pin)"
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "touch-slide-l",
+      "top": 200,
+      "left": 200,
+      "attrs": { "color": "green", "label": "←" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "touch-slide-r",
+      "top": 200,
+      "left": 360,
+      "attrs": { "color": "green", "label": "→" }
+    }
+  ],
+  "connections": [
+    [ "esp:GND.1", "lcd:GND", "black", [] ],
+    [ "esp:3V3",   "lcd:VCC", "red",   [] ],
+    [ "esp:6",     "lcd:SCK", "yellow", [ "h0" ] ],
+    [ "esp:7",     "lcd:MOSI","orange", [ "h0" ] ],
+    [ "esp:2",     "lcd:D/C", "purple", [ "h0" ] ],
+    [ "esp:10",    "lcd:CS",  "white",  [ "h0" ] ],
+    [ "esp:3",     "lcd:LED", "green",  [ "h0" ] ],
+
+    [ "touch-tap:1.l",     "esp:GND.2", "black", [] ],
+    [ "touch-tap:2.r",     "esp:0",     "blue",  [] ],
+    [ "touch-slide-l:1.l", "esp:GND.2", "black", [] ],
+    [ "touch-slide-l:2.r", "esp:8",     "green", [] ],
+    [ "touch-slide-r:1.l", "esp:GND.2", "black", [] ],
+    [ "touch-slide-r:2.r", "esp:9",     "green", [] ],
+
+    [ "$serialMonitor:RX", "esp:TX", "", [] ],
+    [ "$serialMonitor:TX", "esp:RX", "", [] ]
+  ],
+  "dependencies": {}
+}

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>豆豆模拟器</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="stage">
+      <header class="meta">
+        <span id="conn-state" class="badge offline">offline</span>
+        <span id="device-id" class="meta-text">device: doudou-sim</span>
+        <span id="seq-info" class="meta-text">seq: —</span>
+        <a class="meta-link" href="/log.html">审批日志 →</a>
+      </header>
+
+      <!-- 240x240 round screen mock (rendered at 1.5x for laptop visibility) -->
+      <section class="device" aria-label="豆豆设备">
+        <div class="lens">
+          <div class="track" id="track">
+            <div class="slide slide-info" data-screen="info">
+              <div class="slide-content" id="slide-info-content"></div>
+            </div>
+            <div class="slide slide-usage" data-screen="usage">
+              <div class="slide-content" id="slide-usage-content"></div>
+            </div>
+            <div class="slide slide-main" data-screen="main">
+              <div class="pet-layer" id="pet-layer"></div>
+              <div class="question-layer" id="question-layer"></div>
+              <div class="title-layer" id="title-layer"></div>
+              <div class="status-layer" id="status-layer"></div>
+            </div>
+            <div class="slide slide-history" data-screen="history">
+              <div class="slide-content" id="slide-history-content"></div>
+            </div>
+          </div>
+        </div>
+        <div class="dots" id="dots">
+          <span class="dot" data-screen="info" title="会话信息"></span>
+          <span class="dot" data-screen="usage" title="用量"></span>
+          <span class="dot active" data-screen="main" title="宠物"></span>
+          <span class="dot" data-screen="history" title="历史"></span>
+        </div>
+        <div class="swipe-hint">信息 · 用量 · 宠物 · 历史</div>
+      </section>
+
+      <footer class="controls">
+        <div class="row">
+          <button id="btn-reconnect" type="button">重连 WS</button>
+          <span class="meta-text" style="color: var(--muted); font-size: 0.75rem;">
+            被动观察模式 · 在 Codex Desktop / CLI 里聊天即可
+          </span>
+        </div>
+        <details>
+          <summary>事件日志</summary>
+          <pre id="log" class="log"></pre>
+        </details>
+      </footer>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,715 @@
+:root {
+  color-scheme: dark;
+  --bg: #14171c;
+  --panel: #1d2128;
+  --fg: #e6e9ee;
+  --muted: #8a909c;
+  --accent: #5aa9ff;
+  --low: #3ec27a;
+  --medium: #e2b53a;
+  --high: #ef5350;
+  --confirm-bg: #2a1f1f;
+
+  --device-size: 360px;
+  --bezel: 14px;                                              /* visual bezel thickness */
+  --lens-size: calc(var(--device-size) - var(--bezel) * 2);   /* 332px round display */
+  /* Inscribed square within the round display, with a small margin. The
+   * round screen's true inscribed square is lens / √2 ≈ 235px; we use 220px
+   * so corner content is comfortably inside the visible circle. */
+  --safe-area: 220px;
+  --safe-inset: calc((var(--lens-size) - var(--safe-area)) / 2);  /* 56px */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  height: 100%;
+  user-select: none;
+}
+
+.stage {
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.meta-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.meta-link {
+  margin-left: auto;
+  color: var(--accent, #6cb6ff);
+  text-decoration: none;
+  font-size: 13px;
+}
+.meta-link:hover { text-decoration: underline; }
+
+.badge {
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+.badge.offline { background: #3a1f24; color: var(--high); }
+.badge.connecting { background: #3a3220; color: var(--medium); }
+.badge.ready { background: #1d2f24; color: var(--low); }
+
+/* ============ Device (round bezel) ============ */
+
+.device {
+  width: var(--device-size);
+  height: var(--device-size);
+  display: grid;
+  place-items: center;
+  position: relative;
+}
+
+.device::before {
+  /* round bezel */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #000;
+  border: var(--bezel) solid #2a2e36;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  transition: box-shadow 200ms ease;
+}
+
+.device.risk-low::before {
+  box-shadow: 0 0 0 4px var(--low) inset, 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+.device.risk-medium::before {
+  box-shadow: 0 0 0 4px var(--medium) inset, 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+.device.risk-high::before {
+  box-shadow: 0 0 0 4px var(--high) inset, 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+
+.lens {
+  width: var(--lens-size);
+  height: var(--lens-size);
+  border-radius: 50%;
+  overflow: hidden;
+  background: #050608;
+  position: relative;
+  touch-action: pan-y; /* horizontal handled by us */
+  cursor: grab;
+}
+.lens:active { cursor: grabbing; }
+
+/* Per-state breathing-light halo. Colour comes from --state-glow set by
+ * pet.ts; the inset box-shadow pulses to simulate an LCD edge glow. The
+ * 420ms transition smooths cross-state hue changes; the keyframes
+ * handle the actual breath. pointer-events: none so it never blocks
+ * taps on the question buttons. */
+.lens::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 0 50px 10px var(--state-glow, transparent);
+  transition: box-shadow 420ms ease;
+  z-index: 3;
+}
+.lens.glow-breathing::after {
+  animation: glow-breath 2600ms ease-in-out infinite;
+}
+@keyframes glow-breath {
+  0%, 100% {
+    opacity: 0.55;
+    box-shadow: inset 0 0 32px 4px var(--state-glow, transparent);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: inset 0 0 64px 16px var(--state-glow, transparent);
+  }
+}
+
+.track {
+  display: flex;
+  /* 4 screens: info, usage, main, history */
+  width: calc(var(--lens-size) * 4);
+  height: 100%;
+  /* default = "main" is the third slide → shift left by 2 widths */
+  transform: translateX(calc(var(--lens-size) * -2));
+  transition: transform 280ms cubic-bezier(0.2, 0.85, 0.3, 1);
+  will-change: transform;
+}
+.track.dragging { transition: none; }
+
+.slide {
+  flex: 0 0 var(--lens-size);
+  height: var(--lens-size);
+  display: grid;
+  place-items: center;
+  position: relative;
+  padding: 0;
+}
+
+.slide-content {
+  width: var(--safe-area);
+  height: var(--safe-area);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ============ Dots ============ */
+
+.dots {
+  position: absolute;
+  bottom: 14px;
+  left: 0; right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  z-index: 2;
+}
+.dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #444a55;
+  transition: background 200ms;
+  cursor: pointer;
+}
+.dot.active { background: var(--fg); width: 8px; height: 8px; border-radius: 50%; }
+
+.swipe-hint {
+  position: absolute;
+  bottom: -28px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-align: center;
+  width: 100%;
+  letter-spacing: 0.02em;
+}
+
+/* ============ Pet layer (main slide) ============ */
+
+.pet-layer {
+  position: absolute;
+  inset: var(--safe-inset);
+  display: grid;
+  place-items: center;
+  transition: opacity 200ms, transform 200ms;
+}
+/* Pet keeps its full size during a question — we just translate the
+   whole pet-layer upward so the visible mochi body sits in the upper
+   half and the bottom half is free for the question card. No
+   resizing, no shrinking — same character feel as the idle screen. */
+.slide-main.has-question .pet-layer {
+  opacity: 1;
+  transform: translateY(-44px);
+  transition: transform 220ms ease;
+}
+
+/* Pet container — relative box that fills the pet-layer safe area; the
+   body + face + accessory ride on top as absolutely-positioned sprites.
+   Breath animates the whole container; per-element animations (spin /
+   float / blink swap) ride on sub-sprites. */
+.pet {
+  position: relative;
+  width: 100%; height: 100%;
+  max-width: 220px; max-height: 220px;
+  transform-origin: 50% 78%;
+  animation: breath 2600ms ease-in-out infinite;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.4));
+}
+
+.pet.wiggle  { animation: wiggle 350ms ease-in-out; }
+.pet.shaking { animation: shake 200ms ease-in-out 4; }
+
+.pet-body {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain; object-position: center;
+  pointer-events: none;
+}
+
+.pet-eye {
+  position: absolute;
+  width: 22%; aspect-ratio: 1;
+  object-fit: contain;
+  pointer-events: none;
+}
+.pet-eye-l { left: 26%; top: 42%; }
+.pet-eye-r { left: 52%; top: 42%; transform: scaleX(-1); }
+
+.pet-mouth {
+  position: absolute;
+  left: 36%; top: 60%;
+  width: 28%; aspect-ratio: 2;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.pet-cheek {
+  position: absolute;
+  width: 12%; aspect-ratio: 1.6;
+  object-fit: contain;
+  opacity: 0.85;
+  pointer-events: none;
+}
+.pet-cheek-l { left: 16%; top: 56%; }
+.pet-cheek-r { left: 72%; top: 56%; transform: scaleX(-1); }
+
+.pet-acc {
+  position: absolute;
+  right: 22%; top: 12%;
+  width: 14%; aspect-ratio: 1;
+  object-fit: contain;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
+}
+.pet-acc.spin  { animation: pet-acc-spin  3000ms linear infinite; }
+.pet-acc.float { animation: pet-acc-float 1700ms ease-in-out infinite; }
+
+@keyframes breath {
+  0%, 100% { transform: scale(1, 1); }
+  50%      { transform: scale(0.98, 1.04) translateY(-2px); }
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0)    rotate(0deg); }
+  25%      { transform: translateX(-6px) rotate(-3deg); }
+  75%      { transform: translateX(6px)  rotate(3deg); }
+}
+@keyframes wiggle {
+  0%, 100% { transform: rotate(0); }
+  25%      { transform: rotate(-10deg) scale(1.06); }
+  75%      { transform: rotate(10deg)  scale(1.06); }
+}
+@keyframes pet-acc-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes pet-acc-float {
+  0%, 100% { transform: translateY(0)    scale(1.00); opacity: 0.92; }
+  50%      { transform: translateY(-8px) scale(1.06); opacity: 1.00; }
+}
+
+.pet-bubble {
+  position: absolute;
+  background: var(--panel);
+  border: 1px solid #2f343d;
+  color: var(--fg);
+  font-size: 0.75rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: bubble-pop 2s ease forwards;
+}
+@keyframes bubble-pop {
+  0%   { opacity: 0; transform: translateY(8px); }
+  10%  { opacity: 1; transform: translateY(0); }
+  85%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+
+/* ============ Status layer (subtle text under pet on idle) ============ */
+
+/* Title-layer: active thread title, anchored to the TOP of the lens
+   (above the pet body). Earlier sat at 50%+44px which made sense for
+   the old emoji pet (~70px tall, lots of headroom); the new sprite
+   body fills the safe area so we moved the title out of its way. */
+.title-layer {
+  position: absolute;
+  top: 18px;
+  left: 40px;
+  right: 40px;        /* slightly tighter than safe-inset so the round
+                         lens edge doesn't clip wide titles */
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--fg);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.slide-main.has-question .title-layer { opacity: 0; }
+
+.status-layer {
+  position: absolute;
+  /* sit below the pet body, above the bottom safe-inset edge */
+  bottom: 32px;
+  left: var(--safe-inset);
+  right: var(--safe-inset);
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--muted);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slide-main.has-question .status-layer { opacity: 0; }
+
+/* ============ Question layer ============ */
+
+/* Question card occupies the bottom band — the pet upstairs is full
+   size but translated up, leaving y=215-310 free for the prompt. */
+.question-layer {
+  position: absolute;
+  /* Bumped top up from 215 → 200 so the meta/title/body have a few more
+   * lines of room before the button row claims the bottom. */
+  top: 200px;
+  /* edge-to-edge — buttons inside take 100% width to maximise touch zone */
+  left: 0;
+  right: 0;
+  bottom: 22px;
+  display: none;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  text-align: center;
+  padding: 0;
+  gap: 2px;
+}
+.slide-main.has-question .question-layer { display: flex; }
+
+.q-meta {
+  font-size: 0.6rem;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.q-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  max-width: var(--safe-area);
+  white-space: nowrap;
+  overflow: hidden;
+  position: relative;
+}
+.q-body {
+  font-size: 0.65rem;
+  color: var(--muted);
+  max-width: var(--safe-area);
+  white-space: nowrap;
+  overflow: hidden;
+  position: relative;
+  min-height: 1em;
+}
+.q-confirm {
+  background: var(--confirm-bg);
+  border: 1px solid var(--high);
+  border-radius: 6px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.68rem;
+  color: var(--high);
+}
+.q-choices {
+  /* default = 2-choice horizontal row.
+   * Bleed the row past the screen edges so the visible portion of each
+   * button extends right to where the round mask cuts off — there's no
+   * visible gap between button edge and screen edge. The hidden overflow
+   * lives in the invisible round corners. */
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  margin-top: 0.4rem;
+  align-items: stretch;
+  justify-content: stretch;
+  width: calc(100% + var(--safe-inset) * 2);
+  margin-left: calc(-1 * var(--safe-inset));
+  margin-right: calc(-1 * var(--safe-inset));
+}
+.q-choices.col {
+  /* 3 or 4 choices → fall back to vertical stack, no bleed needed since
+   * vertical doesn't have the round-edge issue. */
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-left: 0;
+  margin-right: 0;
+  align-items: stretch;
+}
+
+.q-btn {
+  /* min-height 48 = comfortable thumb tap on the 1.28" panel (~6.4 mm).
+   * flex: 1 → in the horizontal row both buttons share the full width. */
+  flex: 1 1 0;
+  min-width: 64px;
+  min-height: 48px;
+  padding: 0.4rem 0.65rem;
+  border-radius: 15px;
+  border: 1px solid #444;
+  background: #2a2e36;
+  color: var(--fg);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+/* In the 2-button horizontal row the buttons bleed past the round mask.
+ * Push each label toward the centre gap so it lands in the visible region,
+ * not in the cropped corner. */
+.q-choices:not(.col) .q-btn:first-child {
+  text-align: right;
+  padding-left: 0;
+  padding-right: 18px;
+}
+.q-choices:not(.col) .q-btn:last-child {
+  text-align: left;
+  padding-right: 0;
+  padding-left: 18px;
+}
+.q-choices.col .q-btn {
+  /* When stacked vertically each row keeps the comfortable height too. */
+  flex: 0 0 auto;
+  min-height: 44px;
+  width: 100%;
+}
+.q-btn:hover { background: #353a44; }
+.q-btn.danger  { border-color: var(--high);   color: var(--high); }
+.q-btn.primary { border-color: var(--accent); color: var(--accent); }
+
+.q-queue {
+  position: absolute;
+  right: 4px;
+  bottom: 0;
+  font-size: 0.65rem;
+  color: var(--muted);
+}
+
+/* ============ Marquee ============ */
+
+.marquee {
+  display: inline-block;
+  padding-left: 100%;
+  animation: marquee 12s linear infinite;
+}
+.marquee:hover { animation-play-state: paused; }
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-100%); }
+}
+
+/* ============ Info slide ============ */
+
+.info-block + .info-block {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid #1f242d;
+}
+.info-block {
+  width: 100%;
+}
+.info-line {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--fg);
+  text-align: center;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.info-faint {
+  font-size: 0.66rem;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============ Usage slide ============ */
+
+.usage-block {
+  width: 100%;
+}
+.usage-block + .usage-block {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #1f242d;
+}
+.usage-heading {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--fg);
+  margin-bottom: 3px;
+  text-align: left;
+}
+.usage-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin: 1px 0;
+  line-height: 1.25;
+}
+.usage-bar {
+  height: 5px;
+  background: #1f242d;
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 2px 0 4px 0;
+}
+.usage-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--low);                                  /* green = healthy remaining */
+  transition: width 250ms ease;
+}
+.usage-bar.warn > span { background: var(--medium); }
+.usage-bar.crit > span { background: var(--high); }
+.usage-empty {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: center;
+  white-space: pre-line;
+}
+
+/* ============ History slide ============ */
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  max-height: calc(var(--safe-area) - 24px);              /* leave room for heading */
+  scrollbar-width: thin;
+}
+.history-list::-webkit-scrollbar { width: 4px; }
+.history-list::-webkit-scrollbar-thumb { background: #2f343d; border-radius: 2px; }
+
+.history-item {
+  display: flex;
+  gap: 4px;
+  align-items: flex-start;
+  font-size: 0.65rem;
+  line-height: 1.3;
+}
+.history-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+.history-dot.low    { background: var(--low); }
+.history-dot.medium { background: var(--medium); }
+.history-dot.high   { background: var(--high); }
+.history-text {
+  flex: 1;
+  min-width: 0;                                            /* allow shrink within flex */
+  text-align: left;
+  overflow: hidden;
+}
+.history-text > div:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Thread-list specific tweaks */
+.history-item.clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background 120ms;
+}
+.history-item.clickable:hover {
+  background: #1f242d;
+}
+.history-item.active .thread-title {
+  color: var(--fg);
+  font-weight: 600;
+}
+.thread-title {
+  font-size: 0.7rem;
+  color: var(--fg);
+  overflow: hidden;
+  white-space: nowrap;
+  position: relative;
+}
+.history-meta {
+  color: var(--muted);
+  font-size: 0.6rem;
+}
+.history-empty {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: center;
+  white-space: pre-line;
+}
+
+/* ============ Controls (below device) ============ */
+
+.controls {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.controls button {
+  padding: 0.4rem 0.9rem;
+  background: #2a2e36;
+  border: 1px solid #444;
+  color: var(--fg);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.prompt-form { display: flex; gap: 0.5rem; width: 100%; }
+.prompt-form input {
+  flex: 1;
+  padding: 0.5rem 0.7rem;
+  background: var(--panel);
+  border: 1px solid #2f343d;
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+.prompt-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.row { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
+
+.prompt-status { font-size: 0.75rem; color: var(--muted); }
+.prompt-status.ok  { color: var(--low); }
+.prompt-status.err { color: var(--high); }
+
+.log {
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 0.6rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  max-height: 200px;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

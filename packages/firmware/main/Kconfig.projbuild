@@ -1,0 +1,82 @@
+menu "Doudou — Bridge connectivity"
+
+config DOUDOU_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Wi-Fi network the device connects to. Leave empty to skip Wi-Fi
+        bring-up entirely (firmware still runs the LVGL pet, just without
+        Codex events). Set via `idf.py menuconfig` or `sdkconfig.local`.
+
+config DOUDOU_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        WPA2 password. Leave empty for open networks.
+
+config DOUDOU_BRIDGE_HOST
+    string "Bridge hostname"
+    default "doudou-bridge.local"
+    help
+        mDNS hostname (or static IP). Resolves automatically via mDNS when
+        Bridge announces _doudou._tcp.local.
+
+config DOUDOU_BRIDGE_PORT
+    int "Bridge WebSocket port"
+    default 8788
+    range 1 65535
+
+config DOUDOU_PAIRING_TOKEN
+    string "Pairing token"
+    default "dev-token-change-me"
+    help
+        Must match Bridge's DOUDOU_PAIRING_TOKEN env var.
+
+config DOUDOU_DEVICE_ID
+    string "Device id (reported in hello)"
+    default "doudou-esp32-001"
+
+choice DOUDOU_TRANSPORT
+    prompt "Bridge transport"
+    default DOUDOU_TRANSPORT_WS
+    help
+        How the firmware talks to Doudou Bridge.
+        WS  — Wi-Fi + WebSocket over LAN (mDNS discovery, current default).
+        BLE — Bluetooth Low Energy GATT, no Wi-Fi needed; Bridge runs a
+              BLE central scanner that finds the device by advertised name.
+
+config DOUDOU_TRANSPORT_WS
+    bool "Wi-Fi + WebSocket"
+
+config DOUDOU_TRANSPORT_BLE
+    bool "BLE GATT"
+    depends on BT_ENABLED && BT_NIMBLE_ENABLED
+    help
+        Requires NimBLE host. Enable in menuconfig:
+            CONFIG_BT_ENABLED=y
+            CONFIG_BT_NIMBLE_ENABLED=y
+        Or build with the bundled BLE defaults:
+            idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ble" build
+
+endchoice
+
+config DOUDOU_BLE_DEVICE_NAME_PREFIX
+    string "BLE advertised name prefix"
+    depends on DOUDOU_TRANSPORT_BLE
+    default "doudou-"
+    help
+        Bridge's BLE scanner matches advertisements whose name starts
+        with this prefix. The firmware appends the last 6 hex chars of
+        its MAC for uniqueness, yielding e.g. "doudou-AABBCC".
+
+config DOUDOU_LCD_FOR_WOKWI
+    bool "Build LCD config for Wokwi preview (disable invert + BGR)"
+    default n
+    help
+        Wokwi only models ILI9341 (no GC9A01). Real device uses
+        invert-on + BGR pixel order; ILI9341 needs the opposite. This
+        flag flips both so the preview shows the intended colours.
+        Leave UNSET for real hardware. Enable via
+        idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wokwi".
+
+endmenu

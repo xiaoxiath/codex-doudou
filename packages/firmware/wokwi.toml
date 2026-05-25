@@ -1,0 +1,9 @@
+# Wokwi project descriptor — see https://docs.wokwi.com/vscode/project-config
+#
+# Wokwi loads the binary we just built and runs it on a simulated
+# ESP32-C3 with the peripherals declared in diagram.json. The elf path
+# gives the simulator symbols so backtraces / breakpoints work.
+[wokwi]
+version = 1
+firmware = 'build/doudou.bin'
+elf      = 'build/doudou.elf'

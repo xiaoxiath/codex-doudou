@@ -1,0 +1,47 @@
+# Doudou — extra sdkconfig defaults to enable BLE GATT transport.
+#
+# Use:
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ble" reconfigure
+#   idf.py build flash monitor
+#
+# What it does:
+#   * Enables BT controller + NimBLE host
+#   * Switches DOUDOU_TRANSPORT to BLE
+#   * Disables Wi-Fi-only LWIP knobs that aren't used in BLE mode
+#
+# Cost:
+#   * Adds ~80KB code + ~30KB SRAM (NimBLE stack)
+#   * Frees Wi-Fi-related RAM if you also disable Wi-Fi (not done here —
+#     net.c is still compiled for now; just unused in BLE transport).
+
+# --- Bluetooth ---
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# Peripheral role only (we wait for Bridge to scan + connect).
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+# One concurrent connection (Bridge only).
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# MTU 247 → ~244B payload per BLE GATT notify, fits our protocol message
+# budget in ≤5 fragments.
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+# Slightly larger task stack — JSON dispatch happens on the host task.
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=4608
+# Bonding storage in NVS — pairing keys survive reboot so re-connect
+# doesn't re-pair from scratch. Single Bridge peer; max 1 bond keeps
+# storage tiny.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+CONFIG_BT_NIMBLE_MAX_BONDS=1
+CONFIG_BT_NIMBLE_MAX_CCCDS=8
+# LE Secure Connections (ECDH-based pairing). MITM auth = no (no
+# input/output on the device so we run Just Works; pairing happens
+# implicitly on first connect, then bond is persisted).
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_SM_LEGACY=n
+
+# --- Pick the transport ---
+CONFIG_DOUDOU_TRANSPORT_WS=n
+CONFIG_DOUDOU_TRANSPORT_BLE=y

@@ -4,5 +4,25 @@ dist/
 .pio/
 .vscode/
 sdkconfig.old
+sdkconfig
+sdkconfig.ws-backup
 managed_components/
+dependencies.lock
+docs/1.28inch_ESP32-2424S012
 
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+.turbo/
+coverage/
+.npmrc.local
+
+# Editor / OS
+.idea/
+*.swp
+*.log
+*.local
+
+# Bridge runtime
+audit/
+*.audit.jsonl

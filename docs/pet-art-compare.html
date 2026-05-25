@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>豆豆 v7 元素装配集成</title>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --panel: #1d2128;
+    --fg: #e6e9ee;
+    --muted: #8a909c;
+    --border: #2f343d;
+
+    /* state body colors */
+    --c-idle:      #f5d98a;
+    --c-thinking:  #87b3ff;
+    --c-executing: #ffc44d;
+    --c-waiting:   #c79aff;
+    --c-done:      #6ddf7d;
+    --c-error:     #ef5350;
+    --c-sleep:     #d4c899;
+    --c-tense:     #f5d98a;
+    /* per-state outer glow */
+    --g-idle:      #fce8ad;
+    --g-thinking:  #a8c8ff;
+    --g-executing: #ffd47a;
+    --g-waiting:   #d8b7ff;
+    --g-done:      #94e9a3;
+    --g-error:     #f47878;
+    --g-sleep:     #e6dcb5;
+    --g-tense:     #fce8ad;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, "PingFang SC", sans-serif; padding: 24px; margin: 0; }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 24px; font-size: 0.85rem; max-width: 880px; }
+
+  .controls {
+    background: var(--panel); padding: 14px 18px; border-radius: 8px; margin-bottom: 24px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  }
+  .controls .label { color: var(--muted); font-size: 0.75rem; margin-right: 4px; }
+  .controls button {
+    background: #2a2e36; color: var(--fg); border: 1px solid #444; border-radius: 6px;
+    padding: 6px 12px; font-size: 0.85rem; cursor: pointer; transition: all 200ms ease;
+  }
+  .controls button.active { color: #14171c; border-color: transparent; font-weight: 600; }
+  .controls button[data-state="idle"].active      { background: var(--c-idle); }
+  .controls button[data-state="thinking"].active  { background: var(--c-thinking); }
+  .controls button[data-state="executing"].active { background: var(--c-executing); }
+  .controls button[data-state="waiting"].active   { background: var(--c-waiting); }
+  .controls button[data-state="done"].active      { background: var(--c-done); }
+  .controls button[data-state="error"].active     { background: var(--c-error); color: #fff;}
+  .controls button[data-state="sleep"].active     { background: var(--c-sleep); }
+  .controls button[data-state="tense"].active     { background: var(--c-tense); }
+  .controls .spacer { flex: 1; }
+  .controls label.switch { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.85rem; cursor: pointer; user-select: none; }
+
+  .stage { display: grid; grid-template-columns: minmax(360px, 1fr) 360px; gap: 24px; align-items: start; }
+  .pet-card {
+    background: var(--panel); border-radius: 12px; padding: 24px;
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+  }
+  .info-card {
+    background: var(--panel); border-radius: 12px; padding: 18px;
+    font-size: 0.85rem;
+  }
+  .info-card h3 { margin: 0 0 12px; font-size: 1rem; }
+  .info-card dl {
+    display: grid; grid-template-columns: 80px 1fr; gap: 8px 12px; margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem;
+  }
+  .info-card dt { color: var(--muted); }
+  .info-card dd { margin: 0; word-break: break-all; }
+  .swatch {
+    display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.15); vertical-align: middle; margin-right: 4px;
+  }
+
+  .lens {
+    width: 320px; height: 320px; border-radius: 50%;
+    background: radial-gradient(circle at 32% 28%, #1a1d22, #05070b 80%);
+    display: grid; place-items: center;
+    position: relative; overflow: hidden;
+    /* bezel + drop shadow are external (real-world bezel) and stay
+       constant; the per-state inset glow lives on ::after so it can
+       breathe independently. No outside ring (device can't glow
+       off-screen). */
+    box-shadow:
+      0 0 0 6px #2a2e36,
+      0 12px 32px rgba(0,0,0,0.5);
+  }
+  /* Edge-glow layer — pulses inset blur/spread + opacity to simulate
+     a "breathing" LCD halo. Color comes from --state-glow set by JS;
+     transition smooths the cross-state hue change. */
+  .lens::after {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: inset 0 0 50px 10px var(--state-glow, transparent);
+    transition: box-shadow 420ms ease;
+  }
+  .lens.glow-breathing::after {
+    animation: glowBreath 2600ms ease-in-out infinite;
+  }
+
+  /* ============ Pet assembly ============ */
+  .pet {
+    position: relative;
+    width: 280px;
+    height: 280px;             /* square — matches pet_body.png 1254×1254 canvas */
+    transform-origin: 50% 78%;
+    will-change: transform;
+    isolation: isolate;        /* contain blend-mode to within .pet */
+  }
+  .pet.breathing { animation: breath 2600ms ease-in-out infinite; }
+  .pet.shaking   { animation: shake 700ms ease-in-out 4; }
+
+  /* Body is just the PNG, rendered as-is (yellow baked in). State
+     differentiation is via face/accessory/glow, NOT body color. */
+  .body-img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none;
+    object-fit: contain;
+    object-position: center;
+  }
+
+  /* Face — absolute positioned overlay, coords are % of .pet 280×280
+     square. Body mochi shape sits in roughly y:38%-86%, x:13%-87% of
+     the square. Face area is upper-middle of mochi. */
+  .face { position: absolute; inset: 0; pointer-events: none; }
+  .eye-l, .eye-r {
+    position: absolute;
+    width: 22%; aspect-ratio: 1;
+    object-fit: contain;
+  }
+  .eye-l { left: 26%; top: 42%; }
+  .eye-r { left: 52%; top: 42%; transform: scaleX(-1); }
+
+  .mouth {
+    position: absolute;
+    left: 36%; top: 60%;
+    width: 28%; aspect-ratio: 2;
+    object-fit: contain;
+  }
+
+  .cheek-l, .cheek-r {
+    position: absolute;
+    width: 12%; aspect-ratio: 1.6;
+    object-fit: contain;
+    opacity: 0.85;
+  }
+  .cheek-l { left: 16%; top: 56%; }
+  .cheek-r { left: 72%; top: 56%; transform: scaleX(-1); }
+
+  .accessory {
+    position: absolute;
+    /* Lens is a 320×320 CIRCLE (visible radius ~160), .pet is 280×280
+       inside it. Accessory must stay inside the circular safe area
+       (>20px from circle edge) AND sit close to body's shoulder.
+       right:22% top:12% width:14% puts farthest corner at ~132px from
+       lens center, leaving ~28px margin to the round edge. */
+    right: 22%; top: 12%;
+    width: 14%; aspect-ratio: 1;
+    object-fit: contain;
+    pointer-events: none;
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.35));
+  }
+  .accessory.spin    { animation: spin 3000ms linear infinite; }
+  .accessory.float   { animation: floatY 1700ms ease-in-out infinite; }
+
+  /* ============ Keyframes ============ */
+  @keyframes breath {
+    0%, 100% { transform: scale(1, 1); }
+    50%      { transform: scale(0.98, 1.04) translateY(-3px); }
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  @keyframes floatY {
+    0%, 100% { transform: translateY(0)    scale(1.00); opacity: 0.92; }
+    50%      { transform: translateY(-8px) scale(1.06); opacity: 1.00; }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0)    rotate(0deg); }
+    25%      { transform: translateX(-6px) rotate(-3deg); }
+    75%      { transform: translateX( 6px) rotate( 3deg); }
+  }
+  @keyframes glowBreath {
+    0%, 100% {
+      opacity: 0.55;
+      box-shadow: inset 0 0 32px 4px var(--state-glow, transparent);
+    }
+    50% {
+      opacity: 1;
+      box-shadow: inset 0 0 64px 16px var(--state-glow, transparent);
+    }
+  }
+
+  /* sprite catalog at bottom */
+  .catalog { margin-top: 32px; }
+  .catalog h2 { font-size: 0.95rem; color: var(--muted); margin: 0 0 10px; font-weight: 500; }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px;
+  }
+  .tile {
+    background: #ffffff; border-radius: 6px; padding: 8px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    background-image:
+      linear-gradient(45deg, #e8e8e8 25%, transparent 25%),
+      linear-gradient(-45deg, #e8e8e8 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #e8e8e8 75%),
+      linear-gradient(-45deg, transparent 75%, #e8e8e8 75%);
+    background-size: 10px 10px;
+    background-position: 0 0, 0 5px, 5px -5px, -5px 0px;
+    background-color: #f8f8f8;
+  }
+  .tile img { max-width: 100%; max-height: 96px; object-fit: contain; }
+  .tile .name { color: #333; font-size: 0.7rem; font-family: ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+  <h1>豆豆 v7 元素装配集成</h1>
+  <p class="lead">Body PNG 烧成 idle 黄(不再 runtime 染色);8 个状态通过切换 eye / mouth / cheek / accessory + lens 内发光 区分。验证组件化方案合成效果。</p>
+
+  <div class="controls">
+    <span class="label">状态:</span>
+    <button data-state="idle" class="active">idle</button>
+    <button data-state="thinking">thinking</button>
+    <button data-state="executing">executing</button>
+    <button data-state="waiting">waiting</button>
+    <button data-state="done">done</button>
+    <button data-state="error">error</button>
+    <button data-state="sleep">sleep</button>
+    <button data-state="tense">tense</button>
+    <div class="spacer"></div>
+    <label class="switch">body:
+      <select id="body-style" style="background:#2a2e36;color:var(--fg);border:1px solid #444;border-radius:4px;padding:2px 6px;">
+        <option value="glossy" selected>glossy 半 3D</option>
+        <option value="flat">flat 卡通</option>
+      </select>
+    </label>
+    <label class="switch"><input type="checkbox" id="anim-breath" checked> 呼吸</label>
+    <label class="switch"><input type="checkbox" id="anim-blink"  checked> 眨眼</label>
+    <label class="switch"><input type="checkbox" id="auto-cycle"> 自动循环</label>
+  </div>
+
+  <div class="stage">
+    <div class="pet-card">
+      <div class="lens glow-breathing" id="lens">
+        <div class="pet breathing" id="pet">
+          <img class="body-img" id="body-img" src="../packages/simulator/public/pet-art/pet_body_glossy.png" alt="body">
+          <div class="face">
+            <img class="cheek-l" id="cheek-l" src="" alt="">
+            <img class="cheek-r" id="cheek-r" src="" alt="">
+            <img class="eye-l"   id="eye-l"   src="" alt="">
+            <img class="eye-r"   id="eye-r"   src="" alt="">
+            <img class="mouth"   id="mouth"   src="" alt="">
+          </div>
+          <img class="accessory" id="accessory" src="" alt="">
+        </div>
+      </div>
+      <div style="color:var(--muted);font-size:0.75rem;text-align:center;max-width:280px;">
+        Lens 模拟 1.28" 圆屏(240×240 实际,这里放大到 320×320 看细节)
+      </div>
+    </div>
+
+    <div class="info-card">
+      <h3>当前合成</h3>
+      <dl id="composition"></dl>
+    </div>
+  </div>
+
+  <div class="catalog">
+    <h2>所有 v7 sprite(透明背景,实际尺寸预览)</h2>
+    <div class="grid" id="catalog-grid"></div>
+  </div>
+
+<script>
+const STATES = {
+  idle:      { eye:'normal',   mouth:'smile',  cheek:true,  acc:null,       color:'#f5d98a', glow:'#fce8ad' },
+  thinking:  { eye:'normal',   mouth:null,     cheek:false, acc:'question', color:'#87b3ff', glow:'#a8c8ff', accAnim:'float' },
+  executing: { eye:'normal',   mouth:'open',   cheek:false, acc:'gear',     color:'#ffc44d', glow:'#ffd47a', accAnim:'spin'  },
+  waiting:   { eye:'surprise', mouth:'open',   cheek:false, acc:null,       color:'#c79aff', glow:'#d8b7ff' },
+  done:      { eye:'happy',    mouth:'grin',   cheek:true,  acc:'sparkle',  color:'#6ddf7d', glow:'#94e9a3', accAnim:'float' },
+  error:     { eye:'x',        mouth:'sad',    cheek:false, acc:'alert',    color:'#ef5350', glow:'#f47878', accAnim:'float' },
+  sleep:     { eye:'sleep',    mouth:'smile',  cheek:true,  acc:'zzz',      color:'#d4c899', glow:'#e6dcb5', accAnim:'float' },
+  tense:     { eye:'normal',   mouth:'wobble', cheek:false, acc:'sweat',    color:'#f5d98a', glow:'#fce8ad', accAnim:'float' },
+};
+
+const REF = '../packages/simulator/public/pet-art/';
+const STATE_ORDER = Object.keys(STATES);
+const ALL_SPRITES = [
+  'pet_body',
+  ...['normal','blink','sleep','x','happy','surprise'].map(v => 'eye_'+v),
+  ...['smile','open','grin','wobble','sad'].map(v => 'mouth_'+v),
+  'cheek',
+  ...['question','gear','sparkle','zzz','sweat','alert'].map(v => 'acc_'+v),
+];
+
+const pet      = document.getElementById('pet');
+const lens     = document.getElementById('lens');
+const eyeL     = document.getElementById('eye-l');
+const eyeR     = document.getElementById('eye-r');
+const mouth    = document.getElementById('mouth');
+const cheekL   = document.getElementById('cheek-l');
+const cheekR   = document.getElementById('cheek-r');
+const acc      = document.getElementById('accessory');
+const comp     = document.getElementById('composition');
+
+let currentState = 'idle';
+let originalEye  = 'normal';
+
+function setState(name) {
+  const s = STATES[name];
+  if (!s) return;
+  currentState = name;
+  originalEye  = s.eye;
+
+  // body
+  pet.style.setProperty('--state-color', s.color);
+  lens.style.setProperty('--state-glow', s.glow);
+
+  // active button
+  document.querySelectorAll('.controls button[data-state]').forEach(b =>
+    b.classList.toggle('active', b.dataset.state === name));
+
+  // eyes
+  eyeL.src = REF + 'eye_' + s.eye + '.png';
+  eyeR.src = REF + 'eye_' + s.eye + '.png';
+
+  // mouth
+  if (s.mouth) {
+    mouth.src = REF + 'mouth_' + s.mouth + '.png';
+    mouth.style.display = '';
+  } else {
+    mouth.style.display = 'none';
+  }
+
+  // cheeks
+  if (s.cheek) {
+    cheekL.src = REF + 'cheek.png';
+    cheekR.src = REF + 'cheek.png';
+    cheekL.style.display = '';
+    cheekR.style.display = '';
+  } else {
+    cheekL.style.display = 'none';
+    cheekR.style.display = 'none';
+  }
+
+  // accessory
+  acc.classList.remove('spin', 'float');
+  if (s.acc) {
+    acc.src = REF + 'acc_' + s.acc + '.png';
+    acc.style.display = '';
+    if (s.accAnim) acc.classList.add(s.accAnim);
+  } else {
+    acc.style.display = 'none';
+  }
+
+  // error → trigger shake once
+  if (name === 'error') {
+    pet.classList.remove('shaking');
+    void pet.offsetWidth;
+    pet.classList.add('shaking');
+    setTimeout(() => pet.classList.remove('shaking'), 700 * 4);
+  }
+
+  // composition info
+  comp.innerHTML = `
+    <dt>state</dt><dd>${name}</dd>
+    <dt>body</dt><dd><span class="swatch" style="background:#f5d98a"></span>pet_body.png (locked yellow)</dd>
+    <dt>eye</dt><dd>eye_${s.eye}.png × 2 (mirror)</dd>
+    <dt>mouth</dt><dd>${s.mouth ? 'mouth_'+s.mouth+'.png' : '<i>—</i>'}</dd>
+    <dt>cheek</dt><dd>${s.cheek ? 'cheek.png × 2 (mirror)' : '<i>—</i>'}</dd>
+    <dt>accessory</dt><dd>${s.acc ? 'acc_'+s.acc+'.png · '+(s.accAnim||'static') : '<i>—</i>'}</dd>
+    <dt>glow</dt><dd><span class="swatch" style="background:${s.glow}"></span>${s.glow}</dd>
+  `;
+}
+
+// controls
+document.querySelectorAll('.controls button[data-state]').forEach(btn => {
+  btn.addEventListener('click', () => setState(btn.dataset.state));
+});
+document.getElementById('anim-breath').addEventListener('change', e => {
+  pet.classList.toggle('breathing', e.target.checked);
+  lens.classList.toggle('glow-breathing', e.target.checked);
+});
+
+// Body style swap (flat cartoon vs glossy semi-3D)
+const bodyImg = document.getElementById('body-img');
+document.getElementById('body-style').addEventListener('change', e => {
+  const v = e.target.value;
+  bodyImg.src = REF + (v === 'glossy' ? 'pet_body_glossy.png' : 'pet_body.png');
+});
+
+// auto-cycle
+let cycleIdx = 0, cycleTimer = null;
+function startCycle() {
+  if (cycleTimer) return;
+  cycleTimer = setInterval(() => {
+    cycleIdx = (cycleIdx + 1) % STATE_ORDER.length;
+    setState(STATE_ORDER[cycleIdx]);
+  }, 3500);
+}
+function stopCycle() { if (cycleTimer) { clearInterval(cycleTimer); cycleTimer = null; } }
+document.getElementById('auto-cycle').addEventListener('change', e => {
+  e.target.checked ? startCycle() : stopCycle();
+});
+
+// blink scheduler
+function scheduleBlink() {
+  const delay = 3000 + Math.random() * 4000;
+  setTimeout(() => {
+    if (document.getElementById('anim-blink').checked &&
+        (originalEye === 'normal' || originalEye === 'surprise')) {
+      const oL = eyeL.src, oR = eyeR.src;
+      eyeL.src = REF + 'eye_blink.png';
+      eyeR.src = REF + 'eye_blink.png';
+      setTimeout(() => { eyeL.src = oL; eyeR.src = oR; }, 130);
+    }
+    scheduleBlink();
+  }, delay);
+}
+scheduleBlink();
+
+// build catalog
+const grid = document.getElementById('catalog-grid');
+ALL_SPRITES.forEach(name => {
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  tile.innerHTML = `<img src="${REF}${name}.png" alt="${name}"><div class="name">${name}</div>`;
+  grid.appendChild(tile);
+});
+
+setState('idle');
+</script>
+</body>
+</html>

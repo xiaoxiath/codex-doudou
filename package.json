@@ -1,0 +1,25 @@
+{
+  "name": "codex-doudou",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Codex Doudou — desktop companion device for Codex (workspace root)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "dev": "pnpm --filter @doudou/bridge run dev",
+    "test": "pnpm -r --filter \"./packages/*\" run test && pnpm firmware:test",
+    "test:ts": "pnpm -r --filter \"./packages/*\" run test",
+    "firmware:test": "make -C packages/firmware/test/host test",
+    "pet-art:build": "python3 scripts/build_pet_art.py",
+    "typecheck": "pnpm -r --filter \"./packages/*\" run typecheck",
+    "regen:codex-bindings": "pnpm --filter @doudou/codex-app-server-protocol run regen"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}

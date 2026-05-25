@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>豆豆审批日志</title>
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --panel: #14171c;
+      --panel-2: #1a1e25;
+      --border: #262b33;
+      --fg: #e6e9ee;
+      --muted: #8a909c;
+      --link: #6cb6ff;
+      --low: #3ec27a;
+      --med: #e2b53a;
+      --high: #ef5350;
+      --unknown: #8a909c;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+    body { font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      background: var(--panel); display: flex; align-items: center; gap: 16px;
+    }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; flex: 1; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    header .meta strong { color: var(--fg); font-weight: 500; }
+    header .actions button {
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--fg);
+      padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;
+    }
+    header .actions button:hover { background: var(--border); }
+    header .actions button.active { background: var(--link); border-color: var(--link); color: #0a0c10; }
+
+    main { padding: 16px 20px; max-width: 1100px; margin: 0 auto; }
+    .empty { text-align: center; color: var(--muted); padding: 64px 0; }
+
+    table {
+      width: 100%; border-collapse: collapse;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: left; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: var(--panel-2); }
+
+    td.ts { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td.device { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+    td.cmd { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--fg); max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    td.latency { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    .risk-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 4px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+    }
+    .risk-low      { background: rgba(62, 194, 122, 0.15);  color: var(--low); }
+    .risk-medium   { background: rgba(226, 181, 58, 0.15);  color: var(--med); }
+    .risk-high     { background: rgba(239, 83, 80, 0.15);   color: var(--high); }
+    .risk-unknown  { background: rgba(138, 144, 156, 0.15); color: var(--unknown); }
+
+    .choice-allow  { color: var(--low); }
+    .choice-deny   { color: var(--high); }
+    .choice-other  { color: var(--muted); }
+
+    .action {
+      display: inline-block; font-size: 12px; padding: 2px 6px;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>豆豆审批日志</h1>
+    <span class="meta" id="meta">加载中…</span>
+    <span class="actions">
+      <button id="filter-all"    class="active">全部</button>
+      <button id="filter-low">low</button>
+      <button id="filter-medium">medium</button>
+      <button id="filter-high">high</button>
+      <button id="refresh">刷新</button>
+    </span>
+  </header>
+  <main>
+    <div id="empty" class="empty" hidden>暂无审批记录。Codex 审批 hook 触发后会在此显示。</div>
+    <table id="table" hidden>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>设备</th>
+          <th>动作</th>
+          <th>风险</th>
+          <th>选择</th>
+          <th>详情</th>
+          <th style="text-align:right">耗时</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </main>
+  <script>
+  /**
+   * Live audit log viewer.
+   * Polls /api/recent every 5 s (also on demand via the Refresh button)
+   * and renders entries newest-first. Entries are typed by audit.ts —
+   * here we only depend on the surface needed for display.
+   *
+   * Filters work client-side because the dataset is small (≤ 100 entries).
+   * For larger horizons add server-side filtering in bridge.ts.
+   */
+  const REFRESH_MS = 5000;
+  const FETCH_N = 100;
+  let currentFilter = 'all';
+  let lastEntries = [];
+
+  const $rows = document.getElementById('rows');
+  const $table = document.getElementById('table');
+  const $empty = document.getElementById('empty');
+  const $meta = document.getElementById('meta');
+
+  function fmtTs(iso) {
+    try {
+      const d = new Date(iso);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    } catch { return iso; }
+  }
+
+  function actionLabel(a) {
+    return ({
+      run_command:    '运行命令',
+      modify_file:    '修改文件',
+      network_access: '访问网络',
+      user_input:     '需要输入',
+      tool_call:      '工具调用',
+    })[a] || a || '?';
+  }
+
+  function choiceCls(c) {
+    if (c === 'allow') return 'choice-allow';
+    if (c === 'deny')  return 'choice-deny';
+    return 'choice-other';
+  }
+
+  function riskBadge(r) {
+    const cls = ['low','medium','high'].includes(r) ? `risk-${r}` : 'risk-unknown';
+    return `<span class="risk-badge ${cls}">${r ?? '?'}</span>`;
+  }
+
+  function applyFilter(entries) {
+    if (currentFilter === 'all') return entries;
+    return entries.filter((e) => e.risk === currentFilter);
+  }
+
+  function render() {
+    const entries = applyFilter(lastEntries);
+    if (entries.length === 0) {
+      $table.hidden = true;
+      $empty.hidden = false;
+      $empty.textContent = currentFilter === 'all'
+        ? '暂无审批记录。Codex 审批 hook 触发后会在此显示。'
+        : `没有 ${currentFilter} 风险的审批记录。`;
+      return;
+    }
+    $empty.hidden = true;
+    $table.hidden = false;
+    $rows.innerHTML = entries.map((e) => {
+      const summary = e.summary ?? '';
+      return `<tr>
+        <td class="ts">${fmtTs(e.ts)}</td>
+        <td class="device">${e.device ?? ''}</td>
+        <td><span class="action">${actionLabel(e.action_type)}</span></td>
+        <td>${riskBadge(e.risk)}</td>
+        <td class="${choiceCls(e.choice)}">${e.choice ?? '—'}</td>
+        <td class="cmd" title="${escapeHtml(summary)}">${escapeHtml(summary)}</td>
+        <td class="latency">${e.latency_ms != null ? `${e.latency_ms} ms` : ''}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch(`/api/recent?n=${FETCH_N}`, { cache: 'no-cache' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      // /api/recent returns { entries: [...] } where each entry is the
+      // slimmed shape from bridge.ts (ts, action_type, risk, choice,
+      // device, detail, latency_ms, request_id).
+      lastEntries = j.entries ?? [];
+      $meta.innerHTML = `共 <strong>${lastEntries.length}</strong> 条 · 最近 <strong>${new Date().toLocaleTimeString()}</strong> 刷新`;
+      render();
+    } catch (err) {
+      $meta.textContent = '刷新失败:' + err;
+    }
+  }
+
+  function setFilter(f) {
+    currentFilter = f;
+    document.querySelectorAll('.actions button[id^=filter-]').forEach((b) => {
+      b.classList.toggle('active', b.id === `filter-${f}`);
+    });
+    render();
+  }
+
+  document.getElementById('filter-all'   ).onclick = () => setFilter('all');
+  document.getElementById('filter-low'   ).onclick = () => setFilter('low');
+  document.getElementById('filter-medium').onclick = () => setFilter('medium');
+  document.getElementById('filter-high'  ).onclick = () => setFilter('high');
+  document.getElementById('refresh'      ).onclick = refresh;
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+</html>

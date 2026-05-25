@@ -1,0 +1,13 @@
+# ESP32-C3 / 4MB Flash partition table for Doudou
+# Layout: bootloader(32KB) + partition_table(4KB) + nvs(16KB) + otadata(8KB) + phy_init(4KB)
+#         + ota_0(1.5MB) + ota_1(1.5MB) + assets(768KB) + audit(64KB) + reserved(128KB)
+# Total used: ~3.97MB of 4MB; ~128KB reserved for future growth.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x4000
+otadata,    data, ota,      0xd000,   0x2000
+phy_init,   data, phy,      0xf000,   0x1000
+ota_0,      app,  ota_0,    0x10000,  0x180000
+ota_1,      app,  ota_1,    0x190000, 0x180000
+assets,     data, spiffs,   0x310000, 0xC0000
+audit,      data, nvs,      0x3D0000, 0x10000

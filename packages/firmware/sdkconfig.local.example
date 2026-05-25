@@ -1,0 +1,18 @@
+# Local overrides for the firmware build — copy this file to
+# `sdkconfig.local` and fill in your own values. `sdkconfig.local`
+# is gitignored so secrets never leave your machine.
+#
+# All keys here are also reachable from `idf.py menuconfig`
+# under  Doudou → Wi-Fi / Bridge.
+
+CONFIG_DOUDOU_WIFI_SSID=""
+CONFIG_DOUDOU_WIFI_PASSWORD=""
+
+# Bridge host: either a hostname that resolves over mDNS
+# (`doudou-bridge.local`, the default) or a direct LAN IP literal
+# (skip mDNS, faster on networks where multicast is flaky).
+CONFIG_DOUDOU_BRIDGE_HOST="doudou-bridge.local"
+
+# Bridge TCP port (matches the value DOUDOU_PORT was started with —
+# default 8788).
+CONFIG_DOUDOU_BRIDGE_PORT=8788

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true,
+    "noEmit": true
+  },
+  "references": [{ "path": "../device-protocol" }],
+  "include": ["src/**/*"]
+}

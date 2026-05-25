@@ -1,0 +1,21 @@
+# Doudou partition table — single source of truth, mirrored in docs/firmware/partitions.csv.
+#
+# Original plan reserved 1.5 MB per OTA slot + 768 KB `assets` for runtime-
+# loaded resources. In practice the sprites are baked into .rodata (see
+# main/pet_art) and 3755-char CJK font is baked into .rodata too, pushing
+# the firmware to ~1.7 MB. We rebalanced once (2026-05-25): bumped OTA
+# slots to 1.75 MB and shrank `assets` to 256 KB (room for future SPIFFS
+# fonts / extra pet art if we ever go that route).
+#
+# Future OTA migration: bin size must stay ≤ 1.75 MB. If it grows past
+# ~1.6 MB it's worth revisiting whether to push assets onto SPIFFS or
+# shrink the CJK font subset.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x4000
+otadata,    data, ota,      0xd000,   0x2000
+phy_init,   data, phy,      0xf000,   0x1000
+ota_0,      app,  ota_0,    0x10000,  0x1C0000
+ota_1,      app,  ota_1,    0x1D0000, 0x1C0000
+assets,     data, spiffs,   0x390000, 0x60000
+audit,      data, nvs,      0x3F0000, 0x10000

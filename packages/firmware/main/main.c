@@ -1,0 +1,367 @@
+/**
+ * main.c — Doudou firmware entry, MVP-1b: real Codex data over WebSocket.
+ *
+ * Boot order:
+ *   display → touch → lvgl → pet_ui → net (wifi+mdns) → bridge_client (ws)
+ *
+ * Touch task handles taps + slide gestures (slide → switch screen,
+ * tap pet → wiggle reaction). Thread-list rows on the HISTORY screen
+ * fire `doudou_bridge_follow_thread` when tapped.
+ *
+ * If Wi-Fi creds aren't configured (CONFIG_DOUDOU_WIFI_SSID empty),
+ * everything except `bridge_client` still runs — the pet sits idle
+ * waiting for a connection.
+ */
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+#include <time.h>
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "display.h"
+#include "touch.h"
+#include "lvgl_port.h"
+#include "pet_ui.h"
+#include "bridge_client.h"
+#include "pins.h"
+#include "sdkconfig.h"
+#if !defined(CONFIG_DOUDOU_TRANSPORT_BLE)
+#include "net.h"
+#endif
+
+static const char *TAG = "doudou";
+
+/* ---------- bridge → UI handlers ---------- */
+
+static void on_ws_connected(void)
+{
+    doudou_pet_set_state(DOUDOU_PET_IDLE);
+    /* Clear the "Bridge disconnected" title left over from on_ws_disconnected
+     * — otherwise after a successful reconnect the stale error title
+     * lingers until a bridge status/session_info event overwrites it. */
+    doudou_pet_set_title("");
+    doudou_pet_set_status("connected");
+}
+
+static void on_ws_disconnected(void)
+{
+    doudou_pet_set_state(DOUDOU_PET_ERROR);
+    doudou_pet_set_title("Bridge disconnected");
+    doudou_pet_set_status("retrying...");
+}
+
+static bool s_clock_synced = false;
+
+static void on_welcome(uint64_t srv_ms, const char *sid)
+{
+    /* The first welcome gives us a real Unix-epoch timestamp from
+     * Bridge — we use it to set the device's wall clock so anything
+     * downstream (USAGE reset-time formatter, audit timestamps, log
+     * timestamps) sees the right "now". RTC is volatile on the C3
+     * we use, so this fires after every cold boot. */
+    if (srv_ms > 0 && !s_clock_synced) {
+        struct timeval tv = {
+            .tv_sec  = (time_t)(srv_ms / 1000),
+            .tv_usec = (suseconds_t)((srv_ms % 1000) * 1000),
+        };
+        if (settimeofday(&tv, NULL) == 0) {
+            s_clock_synced = true;
+            time_t now = (time_t)(srv_ms / 1000);
+            struct tm tm_local;
+            localtime_r(&now, &tm_local);
+            char buf[40];
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &tm_local);
+            ESP_LOGI(TAG, "clock synced from bridge → %s", buf);
+        } else {
+            ESP_LOGW(TAG, "settimeofday failed");
+        }
+    }
+    ESP_LOGI(TAG, "welcome session=%s server_time=%" PRIu64, sid ? sid : "?", srv_ms);
+}
+
+static void on_status(const doudou_status_t *s)
+{
+    if (s->state) doudou_pet_set_state_str(s->state);
+    if (s->title) doudou_pet_set_status(s->title);
+    if (s->body)  ESP_LOGD(TAG, "status body=%s", s->body);
+}
+
+static void on_session_info(const doudou_session_info_t *si)
+{
+    /* Copy bridge_client's struct into the UI's identical struct
+     * (separate headers so they don't depend on each other). */
+    doudou_ui_session_info_t ui = {
+        .session_id         = si->session_id,
+        .thread_title       = si->thread_title,
+        .source             = si->source,
+        .model              = si->model,
+        .reasoning_effort   = si->reasoning_effort,
+        .summary_mode       = si->summary_mode,
+        .cwd                = si->cwd,
+        .permissions        = si->permissions,
+        .collaboration_mode = si->collaboration_mode,
+        .account_email      = si->account_email,
+        .plan_type          = si->plan_type,
+        .agents_md          = si->agents_md,
+    };
+    doudou_pet_set_session_info(&ui);
+    if (si->thread_title) doudou_pet_set_title(si->thread_title);
+}
+
+static void on_usage(const doudou_usage_t *u)
+{
+    doudou_ui_limit_t ui_limits[8];
+    int n = u->n_limits < (int)(sizeof(ui_limits) / sizeof(ui_limits[0]))
+            ? u->n_limits : (int)(sizeof(ui_limits) / sizeof(ui_limits[0]));
+    for (int i = 0; i < n; i++) {
+        ui_limits[i].id            = u->limits[i].id;
+        ui_limits[i].label         = u->limits[i].label;
+        ui_limits[i].group_label   = u->limits[i].group_label;
+        ui_limits[i].used_pct      = u->limits[i].used_pct;
+        ui_limits[i].window_minutes = u->limits[i].window_minutes;
+        ui_limits[i].resets_at_ms  = u->limits[i].resets_at_ms;
+    }
+    doudou_ui_usage_t ui = {
+        .has_session            = u->has_session,
+        .input_tokens           = u->input_tokens,
+        .output_tokens          = u->output_tokens,
+        .cached_tokens          = u->cached_tokens,
+        .total_tokens           = u->total_tokens,
+        .current_context_tokens = u->current_context_tokens,
+        .model_context_window   = u->model_context_window,
+        .plan_type              = u->plan_type,
+        .limits                 = ui_limits,
+        .n_limits               = n,
+    };
+    doudou_pet_set_usage(&ui);
+}
+
+static void on_thread_list(const doudou_thread_t *threads, int n)
+{
+    doudou_ui_thread_t buf[12];
+    int copy = n < (int)(sizeof(buf) / sizeof(buf[0])) ? n : (int)(sizeof(buf) / sizeof(buf[0]));
+    for (int i = 0; i < copy; i++) {
+        buf[i].id            = threads[i].id;
+        buf[i].title         = threads[i].title;
+        buf[i].source        = threads[i].source;
+        buf[i].active        = threads[i].active;
+        buf[i].updated_at_ms = threads[i].updated_at_ms;
+    }
+    doudou_pet_set_threads(buf, copy);
+}
+
+static void on_error(const char *code, const char *title, const char *body)
+{
+    ESP_LOGW(TAG, "bridge error code=%s title=%s body=%s",
+             code ? code : "?", title ? title : "", body ? body : "");
+    doudou_pet_set_state(DOUDOU_PET_ERROR);
+    if (title) doudou_pet_set_title(title);
+}
+
+static void on_question(const doudou_question_t *q)
+{
+    if (!q) {
+        ESP_LOGW(TAG, "on_question got NULL");
+        return;
+    }
+    ESP_LOGI(TAG, "RECEIVED question id=%s risk=%s action=%s title=\"%s\" choices=%d",
+             q->id ? q->id : "?",
+             q->risk ? q->risk : "?",
+             q->action_type ? q->action_type : "?",
+             q->title ? q->title : "",
+             q->n_choices);
+    /* Surface as a waiting_input pet state so the screen and pose match,
+     * then layer the question overlay on top of the PET screen. */
+    doudou_pet_set_state(DOUDOU_PET_WAITING);
+    if (q->title) doudou_pet_set_title(q->title);
+    doudou_pet_show_question(q);
+}
+
+static void on_thread_clicked(const char *thread_id)
+{
+    ESP_LOGI(TAG, "ui requested follow_thread → %s", thread_id);
+    doudou_bridge_follow_thread(thread_id);
+}
+
+static void on_question_reply(const char *question_id, const char *choice_id)
+{
+    ESP_LOGI(TAG, "ui reply question_id=%s choice_id=%s", question_id, choice_id);
+    doudou_bridge_reply(question_id, choice_id);
+    /* Drop back to idle after answering; bridge will send a fresh status soon. */
+    doudou_pet_set_state(DOUDOU_PET_IDLE);
+}
+
+/* ---------- net → bridge wiring ---------- */
+
+static const doudou_bridge_handlers_t s_bridge_handlers = {
+    .on_connected    = on_ws_connected,
+    .on_disconnected = on_ws_disconnected,
+    .on_welcome      = on_welcome,
+    .on_status       = on_status,
+    .on_session_info = on_session_info,
+    .on_usage        = on_usage,
+    .on_thread_list  = on_thread_list,
+    .on_question     = on_question,
+    .on_error        = on_error,
+};
+
+#if !defined(CONFIG_DOUDOU_TRANSPORT_BLE)
+static void on_net_ready(const char *url)
+{
+    ESP_LOGI(TAG, "net ready → %s", url);
+    doudou_bridge_connect(url, &s_bridge_handlers);
+}
+#endif
+
+/* ---------- touch input task ---------- */
+
+static void touch_input_task(void *arg)
+{
+    (void)arg;
+    doudou_touch_event_t last = {0};
+    int64_t last_armed_us  = 0;
+    int     press_streak   = 0;     /* consecutive 'finger>0' reads */
+    bool    was_armed      = false;
+    /* Strict per-press dedup: exactly one gesture fires per physical
+     * touch. Start "fired" so any boot-time phantom gesture is ignored
+     * until we've actually seen a finger touch the panel. */
+    bool fired_this_press  = true;
+    while (1) {
+        doudou_touch_event_t e = {0};
+        doudou_touch_read(&e);
+        int64_t now_us = esp_timer_get_time();
+
+        /* Debounce: the CST816D periodically self-fires its gesture
+         * register WITHOUT any real touch (observed: ~0.4 Hz of stray
+         * gesture=0x03 on idle hardware). Single-cycle 'finger>0'
+         * glitches do happen too — and a stray finger+stray gesture
+         * landing in the same 10 ms poll used to slip through.
+         *
+         * Fix: a press must be held for ≥2 consecutive reads (~20 ms)
+         * before we'll arm a gesture window. Real touches always last
+         * 50+ ms, so we never lose a legit press. */
+        if (e.pressed) {
+            if (press_streak < 8) press_streak++;
+        } else {
+            press_streak = 0;
+        }
+        /* Require ≥5 consecutive 'pressed' reads (~50 ms) before arming.
+         * Real touches always last 50+ ms; transient I²C / EMC glitches
+         * rarely sustain that long. Bumped from 2 because we observed
+         * a 150-ms phantom-press burst on idle hw that passed the lower
+         * threshold and fired a phantom screen_shift. */
+        bool armed = press_streak >= 5;
+
+        if (armed) {
+            last_armed_us = now_us;
+            if (!was_armed) {
+                /* Rising edge — arm one gesture for this touch. */
+                fired_this_press = false;
+            }
+        }
+        was_armed = armed;
+
+        /* Phantom-filter: a confirmed press must have happened in the
+         * last 800 ms. Without this, a cold-start gesture latch would
+         * slip through before any press has been observed. */
+        bool recent_press = (now_us - last_armed_us) < 800 * 1000;
+
+        if (recent_press
+            && !fired_this_press
+            && e.gesture != last.gesture
+            && e.gesture != DOUDOU_GESTURE_NONE) {
+            fired_this_press = true;
+            ESP_LOGI(TAG, "hw gesture transition %02x → %02x", last.gesture, e.gesture);
+            switch (e.gesture) {
+                case DOUDOU_GESTURE_SLIDE_LEFT:
+                    doudou_screen_shift(+1);
+                    break;
+                case DOUDOU_GESTURE_SLIDE_RIGHT:
+                    doudou_screen_shift(-1);
+                    break;
+                case DOUDOU_GESTURE_SINGLE_TAP:
+                case DOUDOU_GESTURE_DOUBLE_TAP:
+                    if (doudou_screen_current() == DOUDOU_SCREEN_PET) {
+                        /* Sleeping → wake with a startled face, settling
+                         * back to idle ~1 s later. Otherwise wiggle. */
+                        if (doudou_pet_wake_from_sleep()) {
+                            ESP_LOGI(TAG, "hw single-tap → wake from sleep");
+                        } else {
+                            ESP_LOGI(TAG, "hw single-tap → wiggle");
+                            doudou_pet_wiggle();
+                        }
+                    }
+                    break;
+                case DOUDOU_GESTURE_LONG_PRESS:
+                    if (doudou_screen_current() == DOUDOU_SCREEN_PET) {
+                        doudou_pet_show_bubble("我在呢~");
+                    }
+                    break;
+                default: break;
+            }
+        }
+        last = e;
+        vTaskDelay(pdMS_TO_TICKS(10));   /* 100Hz polling — catch fast flicks */
+    }
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "doudou firmware boot, target=esp32c3, MVP-1b");
+
+    /* Lock the device timezone before Wi-Fi/bridge come up so that as
+     * soon as `on_welcome` sets the wall clock, `localtime_r` already
+     * yields the user-facing wall time. CST-8 = Asia/Shanghai (UTC+8).
+     * If the target market changes, override at compile time. */
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    if (doudou_display_init() != ESP_OK) {
+        ESP_LOGE(TAG, "display init failed; halting");
+        return;
+    }
+    if (doudou_touch_init() != ESP_OK) {
+        ESP_LOGW(TAG, "touch init failed — UI works without swipe");
+    }
+    if (doudou_lvgl_init() != ESP_OK) {
+        ESP_LOGE(TAG, "lvgl init failed; halting");
+        return;
+    }
+    if (doudou_pet_ui_init() != ESP_OK) {
+        ESP_LOGE(TAG, "pet UI init failed; halting");
+        return;
+    }
+    doudou_pet_set_thread_click_cb(on_thread_clicked);
+    doudou_pet_set_question_cb(on_question_reply);
+
+    xTaskCreate(touch_input_task, "touch", 4096, NULL, 5, NULL);
+
+#if defined(CONFIG_DOUDOU_TRANSPORT_BLE)
+    /* BLE transport — no Wi-Fi handshake, no mDNS. The peripheral starts
+     * advertising immediately; Bridge's BLE central will scan + connect
+     * when the user runs it with DOUDOU_BLE=1. */
+    doudou_pet_set_title("等待 Bridge 连接");
+    doudou_pet_set_status("BLE 广播中...");
+    esp_err_t be = doudou_bridge_connect(NULL, &s_bridge_handlers);
+    if (be != ESP_OK) {
+        ESP_LOGE(TAG, "ble bring-up failed: %s", esp_err_to_name(be));
+    }
+#else
+    /* Network is optional — if Wi-Fi isn't configured we just sit on the
+     * idle pet face. Once configured, ws will connect and real data flows. */
+    esp_err_t e = doudou_net_start(on_net_ready);
+    if (e == ESP_ERR_NOT_FOUND) {
+        doudou_pet_set_title("Wi-Fi 未配置");
+        doudou_pet_set_status("set CONFIG_DOUDOU_WIFI_*");
+    } else if (e != ESP_OK) {
+        ESP_LOGE(TAG, "net start failed: %s", esp_err_to_name(e));
+    }
+#endif
+
+    ESP_LOGI(TAG, "boot complete");
+}

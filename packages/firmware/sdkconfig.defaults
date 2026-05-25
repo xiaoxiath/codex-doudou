@@ -1,0 +1,65 @@
+# Doudou ESP-IDF defaults — board: ESP32-2424S012 (ESP32-C3-MINI-1U + GC9A01 round LCD).
+# Apply with `idf.py reconfigure`. Override per-developer via sdkconfig.local.
+
+# Target
+CONFIG_IDF_TARGET="esp32c3"
+CONFIG_IDF_TARGET_ESP32C3=y
+
+# Partition table — use the project-local custom CSV.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Flash size (4MB on this board).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Tighten heap headroom — LVGL + Wi-Fi will need it later.
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# LVGL animation + sprite blitting + 196KB CJK font keeps CPU 0 busy in
+# bursts, blocking the IDLE task from petting the watchdog. The system
+# isn't actually hung — LVGL keeps yielding via vTaskDelay — but the
+# IDLE-task check fires anyway. Disable just that check; the int_wdt
+# (interrupt-disabled-too-long) safety remains armed.
+# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 is not set
+
+# Logging on UART0 — board USB-CDC routes here via the USB-Serial chip.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Disable BT for MVP-1a (saves ~50KB RAM, will re-enable for BLE pairing in MVP-3).
+# CONFIG_BT_ENABLED is not set
+
+# ---- LWIP / Wi-Fi tuning for MVP-1b ----
+# Smaller default LWIP TCP windows — saves ~20KB RAM, fine for a single WS connection.
+CONFIG_LWIP_TCP_WND_DEFAULT=4380
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=4380
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
+# mDNS — single interface (STA only). Default in this version of mdns
+# component covers more interfaces (eth/sta/ap); narrowing saves a bit.
+CONFIG_MDNS_MAX_INTERFACES=1
+
+# ---- LVGL v9 (values must not have inline comments — Kconfig parses them literally) ----
+CONFIG_LV_CONF_SKIP=n
+# Note: LV_USE_OS isn't surfaced as Kconfig in 9.2 — LVGL's mutex on
+# FreeRTOS is opt-in via lv_conf code. Our lvgl_port.c provides its
+# own recursive mutex around all lv_*** calls, which is sufficient.
+CONFIG_LV_COLOR_DEPTH_16=y
+# Heap pool for LVGL widget allocations (KB)
+CONFIG_LV_MEM_SIZE_KILOBYTES=48
+# Refresh period in ms (20 = 50Hz)
+CONFIG_LV_DEF_REFR_PERIOD=20
+# Built-in fonts. _14 stays as the LVGL "default" for stock widgets that
+# don't take an explicit font (every Doudou label overrides to use the
+# custom CJK font in font_cjk/). _20 and _28 were once used for big
+# headings, now superseded by the CJK font — dropping them shaves a few
+# KB of ROM.
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+# Disable demos to save flash
+CONFIG_LV_USE_DEMO_WIDGETS=n
+CONFIG_LV_USE_DEMO_BENCHMARK=n
+CONFIG_LV_USE_DEMO_STRESS=n

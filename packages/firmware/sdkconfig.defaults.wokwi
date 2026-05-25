@@ -1,0 +1,21 @@
+# Doudou — extra sdkconfig defaults for Wokwi preview.
+#
+# Use:
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wokwi" reconfigure
+#   idf.py build
+#   then run the Wokwi simulator (diagram.json).
+#
+# What it does:
+#   * Flips DOUDOU_LCD_INVERT_COLOR + DOUDOU_LCD_BGR_ORDER off so the
+#     ILI9341 model in Wokwi (used as a stand-in for GC9A01) shows the
+#     intended colours instead of an inverted BGR negative.
+#
+# What it does NOT fix:
+#   * Wokwi's ILI9341 is 240×320 rectangular; firmware paints only the
+#     top 240×240. The bottom 80 lines show uninitialised LCD content.
+#     Mentally crop to the top square — the visible UI is correct.
+#   * Wi-Fi is a gateway mock and won't reach a real Bridge.
+#   * BLE is not modelled at all — this build still uses the default
+#     WS transport (set in sdkconfig.defaults).
+
+CONFIG_DOUDOU_LCD_FOR_WOKWI=y

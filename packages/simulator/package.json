@@ -1,0 +1,21 @@
+{
+  "name": "@doudou/simulator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-based simulator for the Doudou device — same wire protocol as real firmware",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'no tests' && exit 0"
+  },
+  "dependencies": {
+    "@doudou/device-protocol": "workspace:*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
+}

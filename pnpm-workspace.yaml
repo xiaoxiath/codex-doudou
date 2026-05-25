@@ -1,0 +1,4 @@
+packages:
+  - packages/*
+  # Note: packages/firmware is an ESP-IDF C project, not a Node package.
+  # pnpm globs include it but since it has no package.json, pnpm ignores it.
