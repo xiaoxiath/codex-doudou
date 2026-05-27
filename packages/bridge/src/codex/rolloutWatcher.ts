@@ -350,6 +350,13 @@ export class RolloutWatcherFeed implements CodexFeed {
     this.fileBuf = '';
     // Drop activity from the previous thread when we switch.
     this.activity = [];
+    /* Clear thread-scoped session_info fields. Otherwise the old
+     * rollout's thread_title leaks into the new thread until (or
+     * unless) the new one explicitly publishes its own. cwd /
+     * git_branch / source get rewritten during the next replay. */
+    if (this.lastSessionInfo) {
+      delete this.lastSessionInfo.thread_title;
+    }
 
     // Replay existing content silently to seed metadata + activity buffer
     // without flashing every historical status/usage on the device's pet.
@@ -599,6 +606,16 @@ export class RolloutWatcherFeed implements CodexFeed {
           thread_id: this.current?.threadId ?? '',
           source: this.current?.source,
         });
+        /* Fallback thread title: not every rollout fires
+         * `thread_name_updated` (Codex Desktop only auto-summarises
+         * sometimes). Without a title push, the device's top label
+         * sits at "-" forever. Seed it from the first user_message
+         * we see in the thread — the user's own prompt is the best
+         * human-readable label we have. */
+        if (text && !this.lastSessionInfo?.thread_title) {
+          const seeded = text.length > 28 ? text.slice(0, 28) + '…' : text;
+          this.emitSessionInfoMerge({ thread_title: seeded });
+        }
         this.emit({
           kind: 'status',
           state: 'thinking',
