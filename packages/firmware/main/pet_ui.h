@@ -53,6 +53,28 @@ void doudou_pet_show_bubble(const char *text);         /* small bubble above pet
  *  If not sleeping, returns false so callers can fall back to wiggle. */
 bool doudou_pet_wake_from_sleep(void);
 
+/* ---- Toy mode (offline pet) ----
+ *
+ * When the device can't reach Bridge for an extended period, main.c
+ * flips toy mode on. In toy mode the device stops being a Codex status
+ * display and becomes a standalone pet driven by touch:
+ *   - single tap  → random new state from {IDLE, DONE, THINKING}
+ *   - triple tap  → surprise (WAITING) then back to IDLE after ~900ms
+ *   - 60 s idle   → auto-sleep (existing behaviour)
+ *   - tap while sleeping → wake_from_sleep (existing behaviour)
+ *
+ * Toy mode is exited the moment WS reconnects — Bridge then takes
+ * authority over state/title/status again. */
+void doudou_pet_toy_mode_set(bool enable);
+bool doudou_pet_toy_mode_active(void);
+/* Double-tap reaction: cycle to a different random pet state from the
+ * 5-state pool (everything except SLEEPING + ERROR). */
+void doudou_pet_toy_tap(void);
+
+/* Long-press reaction: force the angry/error face. Has a built-in
+ * side-shake animation, so it doubles as a "you poked too hard" feel. */
+void doudou_pet_toy_long_press(void);
+
 /** Switch active screen with LVGL slide animation. */
 void doudou_screen_show(doudou_screen_id_t which);
 /** Advance current screen by ±1 (with wrap stop at edges). */

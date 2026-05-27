@@ -40,19 +40,25 @@ static const char *TAG = "doudou";
 
 static void on_ws_connected(void)
 {
+    if (doudou_pet_toy_mode_active()) doudou_pet_toy_mode_set(false);
+
     doudou_pet_set_state(DOUDOU_PET_IDLE);
-    /* Clear the "Bridge disconnected" title left over from on_ws_disconnected
-     * — otherwise after a successful reconnect the stale error title
-     * lingers until a bridge status/session_info event overwrites it. */
+    /* Clear any leftover title so the next session_info push from bridge
+     * lands on a clean widget. */
     doudou_pet_set_title("");
     doudou_pet_set_status("connected");
 }
 
 static void on_ws_disconnected(void)
 {
-    doudou_pet_set_state(DOUDOU_PET_ERROR);
-    doudou_pet_set_title("Bridge disconnected");
-    doudou_pet_set_status("retrying...");
+    /* No grace, no "Bridge disconnected" banner — the kid doesn't care
+     * why the link dropped. Flip straight to toy mode on the first
+     * disconnect, then ignore subsequent reconnect-attempt failures
+     * (toy_mode_set is idempotent). */
+    if (!doudou_pet_toy_mode_active()) {
+        ESP_LOGI(TAG, "WS down → toy mode");
+        doudou_pet_toy_mode_set(true);
+    }
 }
 
 static bool s_clock_synced = false;
@@ -279,27 +285,61 @@ static void touch_input_task(void *arg)
             ESP_LOGI(TAG, "hw gesture transition %02x → %02x", last.gesture, e.gesture);
             switch (e.gesture) {
                 case DOUDOU_GESTURE_SLIDE_LEFT:
-                    doudou_screen_shift(+1);
-                    break;
                 case DOUDOU_GESTURE_SLIDE_RIGHT:
-                    doudou_screen_shift(-1);
+                    /* Toy mode locks the pet on the PET screen — the
+                     * other three screens (INFO/USAGE/HISTORY) need
+                     * live Bridge data, and showing them blank would
+                     * just confuse a child. Block the swipe entirely. */
+                    if (doudou_pet_toy_mode_active()) {
+                        ESP_LOGI(TAG, "toy: slide ignored");
+                        break;
+                    }
+                    doudou_screen_shift(e.gesture == DOUDOU_GESTURE_SLIDE_LEFT ? +1 : -1);
                     break;
                 case DOUDOU_GESTURE_SINGLE_TAP:
-                case DOUDOU_GESTURE_DOUBLE_TAP:
-                    if (doudou_screen_current() == DOUDOU_SCREEN_PET) {
-                        /* Sleeping → wake with a startled face, settling
-                         * back to idle ~1 s later. Otherwise wiggle. */
-                        if (doudou_pet_wake_from_sleep()) {
-                            ESP_LOGI(TAG, "hw single-tap → wake from sleep");
+                case DOUDOU_GESTURE_DOUBLE_TAP: {
+                    /* CST816D's hardware DOUBLE_TAP register (0x0B) is
+                     * unreliable — it often reports two SINGLE_TAPs in
+                     * a row instead. Synthesize double-tap in software
+                     * by timing two consecutive SINGLE_TAP gestures.
+                     * Hardware-reported DOUBLE_TAP still works (folded
+                     * into the same branch via `is_double = true`). */
+                    static int64_t s_last_tap_us = 0;
+                    int64_t tap_now = esp_timer_get_time();
+                    bool is_double = (e.gesture == DOUDOU_GESTURE_DOUBLE_TAP)
+                                  || (s_last_tap_us != 0
+                                      && (tap_now - s_last_tap_us) < 450 * 1000);
+                    /* Reset so a 3rd tap doesn't re-fire double-tap. */
+                    s_last_tap_us = is_double ? 0 : tap_now;
+
+                    if (doudou_screen_current() != DOUDOU_SCREEN_PET) break;
+
+                    /* Sleeping → wake takes priority regardless of single/double. */
+                    if (doudou_pet_wake_from_sleep()) {
+                        ESP_LOGI(TAG, "tap → wake from sleep");
+                        break;
+                    }
+
+                    if (is_double) {
+                        if (doudou_pet_toy_mode_active()) {
+                            doudou_pet_toy_tap();           /* cycle expression */
                         } else {
-                            ESP_LOGI(TAG, "hw single-tap → wiggle");
+                            ESP_LOGI(TAG, "double-tap (online) → wiggle");
                             doudou_pet_wiggle();
                         }
+                    } else {
+                        ESP_LOGI(TAG, "single-tap → wiggle");
+                        doudou_pet_wiggle();
                     }
                     break;
+                }
                 case DOUDOU_GESTURE_LONG_PRESS:
                     if (doudou_screen_current() == DOUDOU_SCREEN_PET) {
-                        doudou_pet_show_bubble("我在呢~");
+                        if (doudou_pet_toy_mode_active()) {
+                            doudou_pet_toy_long_press();
+                        } else {
+                            doudou_pet_show_bubble("我在呢~");
+                        }
                     }
                     break;
                 default: break;

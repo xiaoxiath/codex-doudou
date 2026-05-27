@@ -334,6 +334,20 @@ static void wake_to_idle_cb(lv_timer_t *t)
     s_wake_to_idle_timer = NULL;
 }
 
+/* Re-arm the "WAITING → IDLE after 900 ms" one-shot. Used by both the
+ * sleep-wake path and toy-mode triple-tap. Caller holds the LVGL lock. */
+static void arm_surprise_settle(void)
+{
+    if (s_wake_to_idle_timer) {
+        lv_timer_delete(s_wake_to_idle_timer);
+        s_wake_to_idle_timer = NULL;
+    }
+    s_wake_to_idle_timer = lv_timer_create(wake_to_idle_cb, 900, NULL);
+    if (s_wake_to_idle_timer) {
+        lv_timer_set_repeat_count(s_wake_to_idle_timer, 1);
+    }
+}
+
 bool doudou_pet_wake_from_sleep(void)
 {
     /* Snapshot state under lock so we don't race the sleep timer. */
@@ -348,17 +362,72 @@ bool doudou_pet_wake_from_sleep(void)
 
     /* Schedule the settle-to-IDLE. lv_timer_create needs the LVGL lock. */
     if (doudou_lvgl_lock(50)) {
-        if (s_wake_to_idle_timer) {
-            lv_timer_delete(s_wake_to_idle_timer);
-            s_wake_to_idle_timer = NULL;
-        }
-        s_wake_to_idle_timer = lv_timer_create(wake_to_idle_cb, 900, NULL);
-        if (s_wake_to_idle_timer) {
-            lv_timer_set_repeat_count(s_wake_to_idle_timer, 1);
-        }
+        arm_surprise_settle();
         doudou_lvgl_unlock();
     }
     return true;
+}
+
+/* ---- toy mode (offline pet) ---- */
+
+static bool s_toy_mode = false;
+
+void doudou_pet_toy_mode_set(bool enable)
+{
+    if (enable == s_toy_mode) return;
+    s_toy_mode = enable;
+    if (enable) {
+        ESP_LOGI(TAG, "toy mode ON");
+        /* set_state recomputes label visibility from (sleeping || toy)
+         * — flip to IDLE so the kid sees a friendly face. We don't push
+         * a title/status because toy mode hides both labels anyway. */
+        doudou_pet_set_state(DOUDOU_PET_IDLE);
+    } else {
+        ESP_LOGI(TAG, "toy mode OFF");
+        /* No state push here — caller (on_ws_connected) already sets
+         * IDLE + clears title + sets status="connected", which will
+         * unhide the labels via the same set_state path. */
+    }
+}
+
+bool doudou_pet_toy_mode_active(void)
+{
+    return s_toy_mode;
+}
+
+void doudou_pet_toy_tap(void)
+{
+    if (!s_toy_mode) return;
+
+    /* Cycle to a different random state. Excludes SLEEPING (that's the
+     * inactivity-timeout screensaver) and ERROR (reserved for the
+     * long-press "tantrum" — it'd feel weird if a kid double-tapped
+     * once and randomly hit the angry face). */
+    static const doudou_pet_state_t pool[] = {
+        DOUDOU_PET_IDLE,
+        DOUDOU_PET_THINKING,
+        DOUDOU_PET_EXECUTING,
+        DOUDOU_PET_WAITING,
+        DOUDOU_PET_DONE,
+    };
+    const int N = (int)(sizeof(pool) / sizeof(pool[0]));
+    doudou_pet_state_t next = pool[0];
+    for (int tries = 0; tries < 6; tries++) {
+        next = pool[esp_random() % N];
+        if (next != s_state) break;
+    }
+    ESP_LOGI(TAG, "toy: double-tap → state %d", (int)next);
+    doudou_pet_set_state(next);
+}
+
+void doudou_pet_toy_long_press(void)
+{
+    if (!s_toy_mode) return;
+    ESP_LOGI(TAG, "toy: long-press → ERROR");
+    /* ERROR's apply_composition starts a side-shake on entry, so the
+     * kid sees the pet visibly throw a fit. Sits in ERROR until the
+     * next tap. */
+    doudou_pet_set_state(DOUDOU_PET_ERROR);
 }
 
 void doudou_pet_wiggle(void)
@@ -677,36 +746,6 @@ static void build_history_screen(lv_obj_t *scr)
     lv_label_set_text(empty, "暂无会话");
 }
 
-/* ------- dots (bottom of screen, indicate current position) ------- */
-/* Bottom-centered page-indicator dots, identical layout on every screen.
- *  Uses a flex-row container aligned to BOTTOM_MID so it sits exactly
- *  centered on the physical screen regardless of the parent's padding. */
-static void build_dots_overlay(lv_obj_t *scr, int active_idx)
-{
-    lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_remove_style_all(bar);
-    lv_obj_set_size(bar, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -14);
-    lv_obj_set_layout(bar, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(bar, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    for (int i = 0; i < DOUDOU_SCREEN_COUNT; i++) {
-        lv_obj_t *d = lv_obj_create(bar);
-        lv_obj_remove_style_all(d);
-        lv_obj_set_size(d, 6, 6);
-        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(d,
-            lv_color_hex(i == active_idx ? 0xe6e9ee : 0x444a55), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, LV_PART_MAIN);
-    }
-}
-
 /* Shared top-of-screen title bar:
  *  - single line, marquee-scrolls when text exceeds the safe width
  *  - centered horizontally, sits 14 px below the screen's top edge
@@ -745,7 +784,6 @@ esp_err_t doudou_pet_ui_init(void)
     build_history_screen(s_screens[DOUDOU_SCREEN_HISTORY]);
 
     for (int i = 0; i < DOUDOU_SCREEN_COUNT; i++) {
-        build_dots_overlay(s_screens[i], i);
         lv_obj_clear_flag(s_screens[i], LV_OBJ_FLAG_SCROLLABLE);
     }
 
@@ -927,6 +965,7 @@ void doudou_pet_set_state(doudou_pet_state_t state)
     }
 
     const bool changed = (state != s_state);
+    const bool was_sleeping = (s_state == DOUDOU_PET_SLEEPING);
     s_state = state;
     if (changed) apply_composition(state);
     if (s_label_status) {
@@ -938,27 +977,47 @@ void doudou_pet_set_state(doudou_pet_state_t state)
                                       LV_PART_MAIN);
     }
     /* SLEEPING is a screensaver: hide top thread-title and bottom
-     * status text so only the dozing pet + zzz accessory show. When
-     * we wake, restore visibility AND re-apply the cached text — while
-     * sleeping, set_title/set_status only updated the cache (the
-     * widget was hidden anyway), so without this re-apply the label
-     * stays whatever it was before sleep and bridge's most-recent
-     * title/status update is invisible. */
+     * status text so only the dozing pet + zzz accessory show.
+     *
+     * We only mess with the LABEL TEXT on the wake-from-sleep edge,
+     * not on every state transition. Reason: set_session_info writes
+     * the thread title directly to the widget WITHOUT going through
+     * doudou_pet_set_title(), so the cache `s_cached_title` is stale
+     * (often stuck at "-" from an earlier WS reconnect). Re-applying
+     * the cache on every set_state would clobber a perfectly good
+     * thread title with "-" when transitioning between
+     * THINKING/EXECUTING/DONE/IDLE. */
     const bool sleeping = (state == DOUDOU_PET_SLEEPING);
+    const bool waking = was_sleeping && !sleeping;
+    /* Hide labels when the screen should look "label-less":
+     *  - SLEEPING: screensaver mode.
+     *  - toy mode: offline pet; the kid plays with the face, not a
+     *    Codex thread title that doesn't exist right now. */
+    const bool hide_labels = sleeping || s_toy_mode;
     if (s_label_title) {
-        if (sleeping) {
+        if (hide_labels) {
             lv_obj_add_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_label_title, LV_OBJ_FLAG_HIDDEN);
-            if (s_cached_title[0]) lv_label_set_text(s_label_title, s_cached_title);
+            /* Only on the wake-from-sleep edge: while sleeping,
+             * set_title silently updated the cache but not the
+             * (hidden) widget. Sync it now so the user sees the
+             * freshest title. Cache and widget agree afterwards
+             * because set_session_info now also routes through
+             * set_title. */
+            if (waking && s_cached_title[0]) {
+                lv_label_set_text(s_label_title, s_cached_title);
+            }
         }
     }
     if (s_label_status) {
-        if (sleeping) {
+        if (hide_labels) {
             lv_obj_add_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_label_status, LV_OBJ_FLAG_HIDDEN);
-            if (s_cached_status[0]) lv_label_set_text(s_label_status, s_cached_status);
+            if (waking && s_cached_status[0]) {
+                lv_label_set_text(s_label_status, s_cached_status);
+            }
         }
     }
     if (changed && state != DOUDOU_PET_SLEEPING) MARK_ACTIVITY_FROM("set_state");
@@ -1104,9 +1163,16 @@ void doudou_pet_set_session_info(const doudou_ui_session_info_t *info)
     if (!info) return;
     if (!doudou_lvgl_lock(100)) return;
 
-    /* Title also drives the pet-screen top label. */
-    if (info->thread_title && s_label_title) {
-        lv_label_set_text(s_label_title, info->thread_title);
+    /* Route thread_title through the cached set_title path so the
+     * cache stays in sync with the widget. Earlier, this wrote
+     * s_label_title directly, leaving s_cached_title stuck at
+     * whatever set_title last received (often "-" from a WS
+     * reconnect) — and the cache-restore-on-wake clobbered the real
+     * title. Going through set_title is the single source of truth. */
+    if (info->thread_title) {
+        doudou_lvgl_unlock();
+        doudou_pet_set_title(info->thread_title);
+        if (!doudou_lvgl_lock(100)) return;
     }
 
     if (s_info_title) {
