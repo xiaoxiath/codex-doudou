@@ -728,6 +728,37 @@ static void build_usage_screen(lv_obj_t *scr)
     lv_label_set_text(l, "暂无用量数据");
 }
 
+/* ------- dots (bottom of screen, indicate current position) ------- */
+/* Bottom-centered page-indicator dots. Only added to INFO/USAGE/HISTORY
+ * — the PET screen would just clash with the centered pet + edge-glow
+ * ring. Toy mode blocks horizontal swipes, so dots are unreachable
+ * (and irrelevant) when the bridge is offline anyway. */
+static void build_dots_overlay(lv_obj_t *scr, int active_idx)
+{
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_remove_style_all(bar);
+    lv_obj_set_size(bar, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -14);
+    lv_obj_set_layout(bar, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    for (int i = 0; i < DOUDOU_SCREEN_COUNT; i++) {
+        lv_obj_t *d = lv_obj_create(bar);
+        lv_obj_remove_style_all(d);
+        lv_obj_set_size(d, 6, 6);
+        lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(d,
+            lv_color_hex(i == active_idx ? 0xe6e9ee : 0x444a55), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, LV_PART_MAIN);
+    }
+}
+
 static void build_history_screen(lv_obj_t *scr)
 {
     /* Standard top title shared across all screens. */
@@ -784,6 +815,11 @@ esp_err_t doudou_pet_ui_init(void)
     build_history_screen(s_screens[DOUDOU_SCREEN_HISTORY]);
 
     for (int i = 0; i < DOUDOU_SCREEN_COUNT; i++) {
+        /* PET screen owns the round edge-glow ring + a centered pet
+         * sprite — dots there are visual clutter the user vetoed.
+         * The other three screens still benefit from the page-indicator
+         * (sliding between INFO/USAGE/HISTORY needs an "I'm here" cue). */
+        if (i != DOUDOU_SCREEN_PET) build_dots_overlay(s_screens[i], i);
         lv_obj_clear_flag(s_screens[i], LV_OBJ_FLAG_SCROLLABLE);
     }
 
@@ -877,7 +913,11 @@ static void sleep_check_cb(lv_timer_t *t)
 static void mark_activity_impl(const char *reason)
 {
     s_last_activity_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "mark_activity(%s) state=%d", reason ? reason : "?", (int)s_state);
+    /* DEBUG-level — useful when triaging "why no sleep?" but should be
+     * silent in normal runs. Bridge replay after reconnect fires this
+     * dozens of times in a few seconds; at INFO that buried real
+     * problems in UART noise and stole CPU from LVGL animations. */
+    ESP_LOGD(TAG, "mark_activity(%s) state=%d", reason ? reason : "?", (int)s_state);
 }
 
 static void mark_activity(void)

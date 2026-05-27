@@ -29,7 +29,12 @@ static const char *TAG = "lvgl_port";
 #define LVGL_BUF_LINES        40
 #define LVGL_TICK_PERIOD_MS    2
 #define LVGL_TASK_STACK     6144
-#define LVGL_TASK_PRIO         2
+/* Same priority as the touch + WS tasks (both 5). At prio 2 the LVGL
+ * task was being preempted ~every 10 ms by touch polling and again by
+ * inbound WS messages, which chopped up animation frames and made
+ * breath/blink visibly stutter. Same prio means cooperative time
+ * slicing — LVGL gets fair CPU share. */
+#define LVGL_TASK_PRIO         5
 
 static SemaphoreHandle_t s_lock = NULL;
 static lv_display_t *s_display = NULL;
@@ -100,9 +105,11 @@ static void lvgl_task(void *arg)
     static int s_iter = 0;
     while (1) {
         uint32_t sleep_ms = 10;
-        /* Log EVERY iteration in the first 10 so we know the loop is
-         * alive at all, then every 100 to keep noise down. */
-        bool verbose = s_iter < 10 || (s_iter % 100 == 0);
+        /* Verbose only for the first few iterations (boot bring-up sanity)
+         * and on slow frames (timer > 200 ms = obvious stutter). Steady-
+         * state chatter at INFO level was burning UART bandwidth and
+         * blocking other tasks that wanted to log. */
+        bool verbose = s_iter < 5;
         if (verbose) ESP_LOGI(TAG, "iter=%d → take_lock", s_iter);
         bool locked = doudou_lvgl_lock(50);
         if (verbose) ESP_LOGI(TAG, "iter=%d locked=%d", s_iter, locked ? 1 : 0);
