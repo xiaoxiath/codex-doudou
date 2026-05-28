@@ -36,10 +36,50 @@
 
 static const char *TAG = "doudou";
 
+/* ---------- net-ready watchdog ----------
+ *
+ * If Wi-Fi is unconfigured / wrong password / no AP in range, the
+ * device would otherwise sit forever waiting for IP. After NET_WAIT_US
+ * we give up and let the user play with the pet anyway. Once Wi-Fi
+ * eventually does come up, `on_net_ready` will fire, bridge_connect
+ * will run, and a successful WS handshake auto-exits toy mode. */
+#define NET_WAIT_US ((uint64_t)15 * 1000 * 1000)
+
+static esp_timer_handle_t s_net_wait_timer = NULL;
+
+static void net_wait_cb(void *arg)
+{
+    (void)arg;
+    if (!doudou_pet_toy_mode_active()) {
+        ESP_LOGI(TAG, "Wi-Fi not ready after 15s → toy mode");
+        doudou_pet_toy_mode_set(true);
+    }
+}
+
+static void net_wait_arm(void)
+{
+    if (s_net_wait_timer) return;
+    const esp_timer_create_args_t args = {
+        .callback = net_wait_cb,
+        .name     = "net_wait",
+    };
+    if (esp_timer_create(&args, &s_net_wait_timer) != ESP_OK) {
+        ESP_LOGW(TAG, "net_wait timer create failed");
+        return;
+    }
+    esp_timer_start_once(s_net_wait_timer, NET_WAIT_US);
+}
+
+static void net_wait_cancel(void)
+{
+    if (s_net_wait_timer) esp_timer_stop(s_net_wait_timer);
+}
+
 /* ---------- bridge → UI handlers ---------- */
 
 static void on_ws_connected(void)
 {
+    net_wait_cancel();
     if (doudou_pet_toy_mode_active()) doudou_pet_toy_mode_set(false);
 
     doudou_pet_set_state(DOUDOU_PET_IDLE);
@@ -220,6 +260,9 @@ static const doudou_bridge_handlers_t s_bridge_handlers = {
 static void on_net_ready(const char *url)
 {
     ESP_LOGI(TAG, "net ready → %s", url);
+    /* Wi-Fi is up — kill the no-network watchdog. If the bridge is
+     * unreachable, on_ws_disconnected will flip into toy mode instead. */
+    net_wait_cancel();
     doudou_bridge_connect(url, &s_bridge_handlers);
 }
 #endif
@@ -392,14 +435,20 @@ void app_main(void)
         ESP_LOGE(TAG, "ble bring-up failed: %s", esp_err_to_name(be));
     }
 #else
-    /* Network is optional — if Wi-Fi isn't configured we just sit on the
-     * idle pet face. Once configured, ws will connect and real data flows. */
+    /* Network is optional — if Wi-Fi isn't configured / can't associate,
+     * we fall back to the standalone offline pet so the device is
+     * never just a dead screen. */
     esp_err_t e = doudou_net_start(on_net_ready);
     if (e == ESP_ERR_NOT_FOUND) {
-        doudou_pet_set_title("Wi-Fi 未配置");
-        doudou_pet_set_status("set CONFIG_DOUDOU_WIFI_*");
+        ESP_LOGI(TAG, "Wi-Fi not configured → toy mode immediately");
+        doudou_pet_toy_mode_set(true);
     } else if (e != ESP_OK) {
         ESP_LOGE(TAG, "net start failed: %s", esp_err_to_name(e));
+        doudou_pet_toy_mode_set(true);
+    } else {
+        /* Wi-Fi is starting; arm a 15-s watchdog so a stuck association
+         * doesn't leave the device idle forever. */
+        net_wait_arm();
     }
 #endif
 
