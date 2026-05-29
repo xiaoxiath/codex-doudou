@@ -808,18 +808,25 @@ esp_err_t doudou_pet_ui_init(void)
     s_screens[DOUDOU_SCREEN_USAGE]   = new_screen(0x14171c);
     s_screens[DOUDOU_SCREEN_PET]     = new_screen(0x0a0c10);
     s_screens[DOUDOU_SCREEN_HISTORY] = new_screen(0x14171c);
+    s_screens[DOUDOU_SCREEN_GAMES]   = new_screen(0x14171c);
 
-    build_info_screen(s_screens[DOUDOU_SCREEN_INFO]);
-    build_usage_screen(s_screens[DOUDOU_SCREEN_USAGE]);
-    build_pet_screen(s_screens[DOUDOU_SCREEN_PET]);
+    build_info_screen   (s_screens[DOUDOU_SCREEN_INFO]);
+    build_usage_screen  (s_screens[DOUDOU_SCREEN_USAGE]);
+    build_pet_screen    (s_screens[DOUDOU_SCREEN_PET]);
     build_history_screen(s_screens[DOUDOU_SCREEN_HISTORY]);
+    /* GAMES screen — list of mini-games built by game_menu.c. */
+    extern esp_err_t doudou_game_menu_build(lv_obj_t *parent);
+    doudou_game_menu_build(s_screens[DOUDOU_SCREEN_GAMES]);
 
     for (int i = 0; i < DOUDOU_SCREEN_COUNT; i++) {
         /* PET screen owns the round edge-glow ring + a centered pet
          * sprite — dots there are visual clutter the user vetoed.
-         * The other three screens still benefit from the page-indicator
-         * (sliding between INFO/USAGE/HISTORY needs an "I'm here" cue). */
-        if (i != DOUDOU_SCREEN_PET) build_dots_overlay(s_screens[i], i);
+         * GAMES screen has its own list with scroll affordances, so
+         * dots there would be redundant. The other three benefit from
+         * the page-indicator (INFO ↔ USAGE ↔ HISTORY). */
+        if (i != DOUDOU_SCREEN_PET && i != DOUDOU_SCREEN_GAMES) {
+            build_dots_overlay(s_screens[i], i);
+        }
         lv_obj_clear_flag(s_screens[i], LV_OBJ_FLAG_SCROLLABLE);
     }
 
@@ -983,6 +990,11 @@ static bool state_warrants_wake(doudou_pet_state_t s)
     /* Anything except IDLE counts as real activity worth waking for. */
     return s != DOUDOU_PET_IDLE
         && s != DOUDOU_PET_SLEEPING;
+}
+
+lv_obj_t *doudou_pet_screen_root(void)
+{
+    return s_screens[DOUDOU_SCREEN_PET];
 }
 
 void doudou_pet_set_state(doudou_pet_state_t state)
@@ -1164,9 +1176,14 @@ void doudou_screen_show(doudou_screen_id_t which)
 
 void doudou_screen_shift(int direction)
 {
+    /* Horizontal swipe only cycles the carousel (INFO/USAGE/PET/
+     * HISTORY); GAMES sits outside it and is reached only via
+     * vertical swipe-down from PET. */
     int next = (int)s_current + (direction < 0 ? -1 : 1);
     if (next < 0) next = 0;
-    if (next >= DOUDOU_SCREEN_COUNT) next = DOUDOU_SCREEN_COUNT - 1;
+    if (next >= DOUDOU_HORIZONTAL_COUNT) next = DOUDOU_HORIZONTAL_COUNT - 1;
+    /* If we were on GAMES and someone called shift, snap back to PET. */
+    if ((int)s_current >= DOUDOU_HORIZONTAL_COUNT) next = DOUDOU_SCREEN_PET;
     ESP_LOGI(TAG, "screen_shift dir=%d, %d → %d",
              direction, (int)s_current, next);
     doudou_screen_show((doudou_screen_id_t)next);
@@ -1349,9 +1366,38 @@ static void format_n(int64_t n, char *out, size_t cap)
     else snprintf(out, cap, "%.2fM", n / 1000000.0);
 }
 
+/* Cheap djb2 over the rendered fields. Bridge replay after reconnect /
+ * follow_thread fires multiple usage pushes back-to-back with identical
+ * (or near-identical) contents — without this check, each one runs
+ * lv_obj_clean + full rebuild and the screen flickers. */
+static uint32_t hash_usage(const doudou_ui_usage_t *u)
+{
+    uint32_t h = 5381;
+    h = h * 33u + (u->has_session ? 1u : 0u);
+    h = h * 33u + (uint32_t)(u->total_tokens & 0xffffffff);
+    h = h * 33u + (uint32_t)(u->current_context_tokens & 0xffffffff);
+    h = h * 33u + (uint32_t)(u->model_context_window & 0xffffffff);
+    h = h * 33u + (uint32_t)u->n_limits;
+    for (int i = 0; i < u->n_limits; i++) {
+        h = h * 33u + (uint32_t)u->limits[i].used_pct;
+        h = h * 33u + (uint32_t)(u->limits[i].resets_at_ms & 0xffffffff);
+        const char *id = u->limits[i].id;
+        if (id) for (const char *p = id; *p; p++) h = h * 33u + (uint8_t)*p;
+    }
+    return h;
+}
+
 void doudou_pet_set_usage(const doudou_ui_usage_t *u)
 {
     if (!u || !s_usage_container) return;
+
+    /* Skip the rebuild when nothing rendered changed — eliminates the
+     * flicker the user reported during bridge-replay bursts. */
+    static uint32_t s_last_usage_hash = 0;
+    uint32_t h = hash_usage(u);
+    if (h == s_last_usage_hash) return;
+    s_last_usage_hash = h;
+
     if (!doudou_lvgl_lock(100)) return;
 
     lv_obj_clean(s_usage_container);

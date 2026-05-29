@@ -36,10 +36,23 @@ typedef enum {
     DOUDOU_SCREEN_USAGE,
     DOUDOU_SCREEN_PET,
     DOUDOU_SCREEN_HISTORY,
-    DOUDOU_SCREEN_COUNT
+    /* GAMES sits outside the horizontal swipe carousel — reached only
+     * by swipe-down from PET (see main.c touch task). Keep it last so
+     * the dots overlay logic that loops over DOUDOU_HORIZONTAL_COUNT
+     * stays simple. */
+    DOUDOU_SCREEN_GAMES,
+    DOUDOU_SCREEN_COUNT,
+    /* Number of screens reachable via horizontal nav (INFO/USAGE/PET/
+     * HISTORY) — GAMES is excluded. */
+    DOUDOU_HORIZONTAL_COUNT = DOUDOU_SCREEN_GAMES,
 } doudou_screen_id_t;
 
 esp_err_t doudou_pet_ui_init(void);
+
+/* The LVGL screen that hosts the pet sprite. Exposed so overlays
+ * (question / mini-game / etc.) can parent themselves to it. */
+struct _lv_obj_t;
+struct _lv_obj_t *doudou_pet_screen_root(void);
 
 void doudou_pet_set_state(doudou_pet_state_t state);
 /** Accepts the wire-format state string (e.g. "idle", "thinking"). */

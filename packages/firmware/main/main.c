@@ -27,6 +27,15 @@
 #include "touch.h"
 #include "lvgl_port.h"
 #include "pet_ui.h"
+#include "lvgl.h"
+#include "lv_font_cjk_14.h"
+#include "whack.h"
+#include "squash.h"
+#include "bubble.h"
+#include "feed.h"
+#include "flappy.h"
+#include "simon.h"
+#include "game_menu.h"
 #include "bridge_client.h"
 #include "pins.h"
 #include "sdkconfig.h"
@@ -232,6 +241,15 @@ static void on_thread_clicked(const char *thread_id)
 {
     ESP_LOGI(TAG, "ui requested follow_thread → %s", thread_id);
     doudou_bridge_follow_thread(thread_id);
+    /* Bridge attaches to the new rollout and silently replays its
+     * history — that can take several seconds for big sessions, during
+     * which no events flow to the device and the screen looks frozen.
+     * Give immediate visual ack: jump to PET, swap to THINKING (sky-
+     * blue glow), and overwrite the title with a loading hint. Bridge's
+     * next session_info / status push will overwrite all of this. */
+    doudou_screen_show(DOUDOU_SCREEN_PET);
+    doudou_pet_set_state(DOUDOU_PET_THINKING);
+    doudou_pet_set_title("切换中...");
 }
 
 static void on_question_reply(const char *question_id, const char *choice_id)
@@ -268,6 +286,102 @@ static void on_net_ready(const char *url)
 #endif
 
 /* ---------- touch input task ---------- */
+
+/* Whether ANY game overlay is currently rendered on the PET screen. */
+static bool any_game_active(void)
+{
+    return doudou_whack_active()  || doudou_squash_active()
+        || doudou_bubble_active()
+        || doudou_feed_active()   || doudou_flappy_active()
+        || doudou_simon_active();
+}
+
+/* Stop whichever game is currently up and jump back to the GAMES
+ * screen so the kid sees the launcher list again. */
+static bool exit_to_menu_if_game_active(void)
+{
+    bool was_active = any_game_active();
+    if (doudou_whack_active())  doudou_whack_stop();
+    if (doudou_squash_active()) doudou_squash_stop();
+    if (doudou_bubble_active()) doudou_bubble_stop();
+    if (doudou_feed_active())   doudou_feed_stop();
+    if (doudou_flappy_active()) doudou_flappy_stop();
+    if (doudou_simon_active())  doudou_simon_stop();
+    if (was_active) doudou_screen_show(DOUDOU_SCREEN_GAMES);
+    return was_active;
+}
+
+/* ---------- in-game exit button ----------
+ *
+ * A small "✕" floating on the top-right of the PET screen, only
+ * visible while a game overlay is up. Triggers on LV_EVENT_LONG_
+ * PRESSED (default ~400 ms hold) so an accidental finger graze
+ * during gameplay drag won't exit — the kid has to *intentionally*
+ * park their finger on the button for nearly half a second. */
+static lv_obj_t *s_exit_btn = NULL;
+
+/* Button hit-area in screen coords. Tap-task watches double-taps
+ * inside this rect to fire the exit. Top-centre placement so it's
+ * easy to find but small enough (30×30) to leave Whack's centre-
+ * top hole untouched (its bbox starts at y=38). */
+#define EXIT_BTN_L  105
+#define EXIT_BTN_R  135
+#define EXIT_BTN_T  4
+#define EXIT_BTN_B  34
+
+static bool point_in_exit_btn(int x, int y)
+{
+    return x >= EXIT_BTN_L && x <= EXIT_BTN_R
+        && y >= EXIT_BTN_T && y <= EXIT_BTN_B;
+}
+
+/* lv_timer that syncs the button visibility with game state. Tick
+ * every 100 ms — cheap and good enough for "show/hide on game
+ * start/stop". Also re-foregrounds the button so freshly-started
+ * games don't bury it under their root overlay. */
+static void exit_btn_sync_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!s_exit_btn) return;
+    bool want = any_game_active();
+    bool now = !lv_obj_has_flag(s_exit_btn, LV_OBJ_FLAG_HIDDEN);
+    if (want && !now) {
+        lv_obj_remove_flag(s_exit_btn, LV_OBJ_FLAG_HIDDEN);
+    } else if (!want && now) {
+        lv_obj_add_flag(s_exit_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (want) lv_obj_move_foreground(s_exit_btn);
+}
+
+static void exit_btn_create(struct _lv_obj_t *pet_screen)
+{
+    if (!pet_screen) return;
+    if (!doudou_lvgl_lock(500)) return;
+    /* Use lv_obj instead of lv_button — and explicitly drop CLICKABLE.
+     * The button is a visual hint only; LVGL skips it during hit
+     * testing so short taps fall through to the game widget beneath.
+     * Long-press detection happens manually in the touch task by
+     * watching e.x/e.y against the button rect. */
+    s_exit_btn = lv_obj_create(pet_screen);
+    lv_obj_set_size(s_exit_btn, EXIT_BTN_R - EXIT_BTN_L, EXIT_BTN_B - EXIT_BTN_T);
+    lv_obj_set_pos(s_exit_btn, EXIT_BTN_L, EXIT_BTN_T);
+    lv_obj_set_style_radius(s_exit_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_exit_btn, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_exit_btn, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_exit_btn, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_exit_btn, lv_color_hex(0xe6e9ee), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_exit_btn, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_clear_flag(s_exit_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_exit_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *l = lv_label_create(s_exit_btn);
+    lv_obj_set_style_text_font(l, &lv_font_cjk_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(l, lv_color_hex(0xe6e9ee), LV_PART_MAIN);
+    lv_label_set_text(l, "X");
+    lv_obj_center(l);
+    lv_obj_add_flag(s_exit_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_create(exit_btn_sync_cb, 100, NULL);
+    doudou_lvgl_unlock();
+}
 
 static void touch_input_task(void *arg)
 {
@@ -315,6 +429,7 @@ static void touch_input_task(void *arg)
         }
         was_armed = armed;
 
+
         /* Phantom-filter: a confirmed press must have happened in the
          * last 800 ms. Without this, a cold-start gesture latch would
          * slip through before any press has been observed. */
@@ -327,17 +442,42 @@ static void touch_input_task(void *arg)
             fired_this_press = true;
             ESP_LOGI(TAG, "hw gesture transition %02x → %02x", last.gesture, e.gesture);
             switch (e.gesture) {
+                case DOUDOU_GESTURE_SLIDE_UP:
+                case DOUDOU_GESTURE_SLIDE_DOWN:
                 case DOUDOU_GESTURE_SLIDE_LEFT:
                 case DOUDOU_GESTURE_SLIDE_RIGHT:
-                    /* Toy mode locks the pet on the PET screen — the
-                     * other three screens (INFO/USAGE/HISTORY) need
-                     * live Bridge data, and showing them blank would
-                     * just confuse a child. Block the swipe entirely. */
-                    if (doudou_pet_toy_mode_active()) {
-                        ESP_LOGI(TAG, "toy: slide ignored");
-                        break;
+                    /* Game active: all swipes belong to gameplay
+                     * (paddle drag, brush stroke, food drag, jittery
+                     * taps on Whack-a-Mole). Swallow them — the only
+                     * exit path during play is the floating ✕ button
+                     * long-press. */
+                    if (any_game_active()) break;
+
+                    if (e.gesture == DOUDOU_GESTURE_SLIDE_DOWN) {
+                        /* Swipe-down on PET → switch to the GAMES
+                         * launcher screen (in both online + toy mode). */
+                        if (doudou_screen_current() == DOUDOU_SCREEN_PET) {
+                            doudou_screen_show(DOUDOU_SCREEN_GAMES);
+                        }
+                    } else if (e.gesture == DOUDOU_GESTURE_SLIDE_UP) {
+                        /* Swipe-up on the GAMES launcher → back to PET. */
+                        if (doudou_screen_current() == DOUDOU_SCREEN_GAMES) {
+                            doudou_screen_show(DOUDOU_SCREEN_PET);
+                        }
+                    } else {
+                        /* Horizontal swipe = INFO/USAGE/PET/HISTORY
+                         * carousel; blocked in toy mode (those screens
+                         * need Bridge data that's gone offline). */
+                        if (doudou_screen_current() == DOUDOU_SCREEN_GAMES) {
+                            /* Same as swipe-up on GAMES — back to PET. */
+                            doudou_screen_show(DOUDOU_SCREEN_PET);
+                        } else if (doudou_pet_toy_mode_active()) {
+                            ESP_LOGI(TAG, "toy: slide ignored");
+                        } else {
+                            doudou_screen_shift(
+                                e.gesture == DOUDOU_GESTURE_SLIDE_LEFT ? +1 : -1);
+                        }
                     }
-                    doudou_screen_shift(e.gesture == DOUDOU_GESTURE_SLIDE_LEFT ? +1 : -1);
                     break;
                 case DOUDOU_GESTURE_SINGLE_TAP:
                 case DOUDOU_GESTURE_DOUBLE_TAP: {
@@ -355,7 +495,39 @@ static void touch_input_task(void *arg)
                     /* Reset so a 3rd tap doesn't re-fire double-tap. */
                     s_last_tap_us = is_double ? 0 : tap_now;
 
+                    /* Double-tap inside the floating X button =
+                     * back to the GAMES screen. Works in any game
+                     * (highest-priority check so doodle's "double-
+                     * tap clears" doesn't fire on exit). */
+                    if (is_double && any_game_active()
+                        && point_in_exit_btn(e.x, e.y)) {
+                        ESP_LOGI(TAG, "exit-button double-tap → back to GAMES");
+                        exit_to_menu_if_game_active();
+                        break;
+                    }
+                    /* On the GAMES screen, LVGL routes taps to the
+                     * row buttons. Just swallow at the touch-task
+                     * level so we don't also wiggle the pet. */
+                    if (doudou_screen_current() == DOUDOU_SCREEN_GAMES) break;
                     if (doudou_screen_current() != DOUDOU_SCREEN_PET) break;
+
+                    /* Game wins: tap routes to whichever game is up.
+                     * Whack + Bubble + Simon use LVGL CLICKED on
+                     * their widgets, Doodle + Feed poll touch from
+                     * their tick timer — most cases just need to
+                     * swallow the event so it doesn't also wiggle. */
+                    if (doudou_whack_active())  break;
+                    if (doudou_bubble_active()) break;
+                    if (doudou_simon_active())  break;
+                    if (doudou_feed_active())   break;
+                    if (doudou_squash_active()) {
+                        doudou_squash_tap();
+                        break;
+                    }
+                    if (doudou_flappy_active()) {
+                        doudou_flappy_flap();
+                        break;
+                    }
 
                     /* Sleeping → wake takes priority regardless of single/double. */
                     if (doudou_pet_wake_from_sleep()) {
@@ -377,13 +549,13 @@ static void touch_input_task(void *arg)
                     break;
                 }
                 case DOUDOU_GESTURE_LONG_PRESS:
-                    if (doudou_screen_current() == DOUDOU_SCREEN_PET) {
-                        if (doudou_pet_toy_mode_active()) {
-                            doudou_pet_toy_long_press();
-                        } else {
-                            doudou_pet_show_bubble("我在呢~");
-                        }
-                    }
+                    /* CST816D's ~500-ms LONG_PRESS is intentionally
+                     * ignored: in-game gameplay involves users pausing
+                     * mid-drag for far longer than 500 ms (think of
+                     * picking up a food token in Feed), so we'd false-
+                     * trigger constantly. The real exit gesture is the
+                     * 5-second static-press detector at the top of
+                     * this loop. Out-of-game the gesture is just noise. */
                     break;
                 default: break;
             }
@@ -421,6 +593,21 @@ void app_main(void)
     }
     doudou_pet_set_thread_click_cb(on_thread_clicked);
     doudou_pet_set_question_cb(on_question_reply);
+
+    /* Mini-game lives as a hidden overlay on the PET screen. Started
+     * by a swipe-up gesture while in toy mode (see touch_input_task). */
+    {
+        struct _lv_obj_t *pet = doudou_pet_screen_root();
+        if (doudou_whack_init (pet) != ESP_OK) ESP_LOGW(TAG, "whack init failed");
+        if (doudou_squash_init(pet) != ESP_OK) ESP_LOGW(TAG, "squash init failed");
+        if (doudou_bubble_init(pet) != ESP_OK) ESP_LOGW(TAG, "bubble init failed");
+        if (doudou_feed_init  (pet) != ESP_OK) ESP_LOGW(TAG, "feed init failed");
+        if (doudou_flappy_init(pet) != ESP_OK) ESP_LOGW(TAG, "flappy init failed");
+        if (doudou_simon_init (pet) != ESP_OK) ESP_LOGW(TAG, "simon init failed");
+        /* Floating exit-button — owned by main.c so it can reach
+         * across to any game's stop() + the screen switcher. */
+        exit_btn_create(pet);
+    }
 
     xTaskCreate(touch_input_task, "touch", 4096, NULL, 5, NULL);
 
