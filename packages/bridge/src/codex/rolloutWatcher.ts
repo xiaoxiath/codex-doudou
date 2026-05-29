@@ -92,6 +92,9 @@ const ACTIVITY_BUFFER_SIZE = 32;
 export class RolloutWatcherFeed implements CodexFeed {
   private onEvent: ((e: BridgeEvent) => void) | null = null;
   private current: RolloutMeta | null = null;
+  /** Path the user explicitly pinned via followThread. While set,
+   *  maybeSwitch refuses to jump to the mtime-latest rollout. */
+  private pinnedPath: string | null = null;
   private offset = 0;
   private fileBuf = '';
   private fsWatcher: FSWatcher | null = null;
@@ -168,11 +171,17 @@ export class RolloutWatcherFeed implements CodexFeed {
       log.warn({ threadId }, 'followThread: rollout not found on disk');
       return false;
     }
+    /* Pin the user's choice so maybeSwitch (which runs every few
+     * seconds and otherwise jumps to the mtime-latest rollout) doesn't
+     * yank us back to whatever Codex Desktop is actively writing. The
+     * pin stays until the user explicitly picks another thread, or
+     * bridge restarts — that matches the intent of an explicit tap. */
+    this.pinnedPath = path;
     if (this.current?.path === path) {
       log.debug({ threadId }, 'followThread: already attached to this thread');
       return true;
     }
-    log.info({ threadId, path }, 'followThread: switching');
+    log.info({ threadId, path }, 'followThread: switching (pinned)');
     await this.attachTo(path);
     return true;
   }
@@ -330,6 +339,10 @@ export class RolloutWatcherFeed implements CodexFeed {
 
   private async maybeSwitch(): Promise<void> {
     if (this.stopped) return;
+    /* Respect a user pin from followThread — don't auto-jump back to
+     * whatever rollout has the newest mtime. The pin clears only when
+     * the user explicitly follows a different thread. */
+    if (this.pinnedPath && this.current?.path === this.pinnedPath) return;
     try {
       const path = await this.findLatestRollout();
       if (path && path !== this.current?.path) {
@@ -383,6 +396,18 @@ export class RolloutWatcherFeed implements CodexFeed {
       this.onEvent?.({
         kind: 'usage',
         session: { model_context_window: this.current.modelContextWindow },
+      });
+    }
+    /* Flush the merged usage cache built up during silent replay. The
+     * per-turn token_count events were swallowed in `emit()`; this
+     * single push gives the device the final state without the count-
+     * up flicker. */
+    if (this.lastUsage) {
+      this.onEvent?.({
+        kind: 'usage',
+        session: this.lastUsage.session,
+        limits: this.lastUsage.limits,
+        plan_type: this.lastUsage.plan_type,
       });
     }
 
@@ -723,8 +748,13 @@ export class RolloutWatcherFeed implements CodexFeed {
         plan_type: e.plan_type ?? this.lastUsage?.plan_type,
       };
     }
-    // During replay, suppress status flicker but still cache + forward usage / session_info.
-    if (this.replayingHistory && e.kind === 'status') return;
+    /* During replay, suppress BOTH status and usage emits. Without
+     * the usage guard the device sees every historical token_count
+     * step (rollouts log one per Codex turn), which on the right
+     * screen looks like the numbers wildly counting up. We've already
+     * cached the latest merged snapshot above; attachTo flushes it
+     * once after replay completes. */
+    if (this.replayingHistory && (e.kind === 'status' || e.kind === 'usage')) return;
     this.onEvent?.(e);
   }
 }
